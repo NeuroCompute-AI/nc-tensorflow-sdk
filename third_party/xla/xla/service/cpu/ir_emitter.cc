@@ -68,6 +68,7 @@ limitations under the License.
 #include "xla/service/cpu/elemental_math_emitter.h"
 #include "xla/service/cpu/ir_emission_utils.h"
 #include "xla/service/cpu/ir_function.h"
+#include "xla/service/cpu/onednn_config.pb.h"
 #include "xla/service/cpu/parallel_loop_emitter.h"
 #include "xla/service/elemental_ir_emitter.h"
 #include "xla/service/hlo_module_config.h"
@@ -335,12 +336,13 @@ absl::Status IrEmitter::EmitConstantGlobals() {
 
     const Literal& literal = llvm_ir::LiteralForConstantAllocation(allocation);
     llvm::Constant* global_for_const;
-    auto it = emitted_literals_.find(&literal);
+    auto it = emitted_literals_.find(LayoutSensitiveLiteralWrapper{literal});
     if (it != emitted_literals_.end()) {
       global_for_const = it->second;
     } else {
       global_for_const = EmitGlobalForLiteral(literal);
-      InsertOrDie(&emitted_literals_, &literal, global_for_const);
+      InsertOrDie(&emitted_literals_, LayoutSensitiveLiteralWrapper{literal},
+                  global_for_const);
     }
 
     InsertOrDie(&constant_buffer_to_global_, allocation.index(),
@@ -738,6 +740,19 @@ absl::Status IrEmitter::HandleSelectAndScatter(
   CHECK_EQ(select_and_scatter->operand_count(), 3);
   const auto operand = select_and_scatter->operand(0);
   const auto source = select_and_scatter->operand(1);
+
+  return HandleSelectAndScatter(select_and_scatter, GetIrArrayFor(operand),
+                                GetIrArrayFor(source),
+                                GetIrArrayFor(select_and_scatter));
+}
+
+absl::Status IrEmitter::HandleSelectAndScatter(
+    HloInstruction* select_and_scatter, const llvm_ir::IrArray& operand_array,
+    const llvm_ir::IrArray& source_array,
+    const llvm_ir::IrArray& output_array) {
+  CHECK_EQ(select_and_scatter->operand_count(), 3);
+  const auto operand = select_and_scatter->operand(0);
+  const auto source = select_and_scatter->operand(1);
   const auto init_value = select_and_scatter->operand(2);
   const Window& window = select_and_scatter->window();
   PrimitiveType operand_element_type = operand->shape().element_type();
@@ -849,7 +864,6 @@ absl::Status IrEmitter::HandleSelectAndScatter(
           Store(operand_index[i], selected_index_address_slot);
         }
       };
-  llvm_ir::IrArray operand_array(GetIrArrayFor(operand));
   llvm_ir::IrArray::Index operand_index(
       operand_multi_index, operand_array.GetShape(), b_.getInt64Ty());
   llvm::Value* operand_data =
@@ -899,10 +913,8 @@ absl::Status IrEmitter::HandleSelectAndScatter(
         selected_index_address->getAllocatedType(), gep_index);
     selected_multi_index.push_back(Load(type, selected_index_address_slot));
   }
-  llvm_ir::IrArray source_array(GetIrArrayFor(source));
   llvm::Value* source_value =
       source_array.EmitReadArrayElement(source_index, &b_);
-  llvm_ir::IrArray output_array(GetIrArrayFor(select_and_scatter));
   llvm_ir::IrArray::Index selected_index(
       selected_multi_index, output_array.GetShape(), source_index.GetType());
   llvm::Value* output_value =
@@ -2702,14 +2714,89 @@ absl::Status IrEmitter::HandleOneDnnMatMulCalls(
   return absl::OkStatus();
 }
 
-absl::Status IrEmitter::HandleOneDnnLayerNorm(HloInstruction* custom_call) {
+absl::Status IrEmitter::HandleOneDnnConvolution(HloInstruction* custom_call) {
   //      args[0]: ptr to nargs
   //      args[1]: ptr to ExecutableRunOptions
-  //      args[2]: ptr to OneDnnLayerNormConfig
+  //      args[2]: ptr to OneDnnConvolutionConfig
   //      args[3...]: ptrs to operands
 
   // First three arguments: nargs, ExecutableRunOptions, and
-  // OneDnnLayerNormConfig.
+  // OneDnnConvolutionConfig.
+  const int nargs_offset = 3;
+  const int num_operands = custom_call->operand_count();
+  const int nargs = nargs_offset + num_operands;
+  int arg_indx = 0;
+
+  llvm::Type* i64_type = b_.getInt64Ty();
+  llvm::Type* ptr_type = b_.getPtrTy();
+  llvm::ArrayType* ptr_array_type = llvm::ArrayType::get(ptr_type, nargs);
+  llvm::Value* args_val = llvm::UndefValue::get(ptr_array_type);
+
+  llvm::Value* nargs_val = b_.getInt64(nargs);
+  llvm::Value* nargs_ptr =
+      llvm_ir::EmitAllocaAtFunctionEntry(i64_type, "nargs", &b_);
+  b_.CreateLifetimeStart(nargs_ptr, b_.getInt64(-1));
+  b_.CreateStore(nargs_val, nargs_ptr);
+  args_val = b_.CreateInsertValue(args_val, nargs_ptr, arg_indx++);
+
+  llvm::Value* run_opts_val = GetExecutableRunOptionsArgument();
+  args_val = b_.CreateInsertValue(args_val, run_opts_val, arg_indx++);
+
+  auto typed_custom_call = Cast<HloCustomCallInstruction>(custom_call);
+  auto backend_config = typed_custom_call->backend_config<BackendConfig>();
+  OneDnnConvolutionConfig conv_config;
+  conv_config.CopyFrom(backend_config->onednn_conv_config());
+  std::string str_config;
+  conv_config.SerializeToString(&str_config);
+  llvm::Value* conv_config_val =
+      b_.CreateGlobalStringPtr(llvm_ir::AsStringRef(str_config));
+  args_val = b_.CreateInsertValue(args_val, conv_config_val, arg_indx++);
+
+  std::vector<StackAlloca> operands_stack_alloca;
+  operands_stack_alloca.reserve(num_operands);
+  absl::c_transform(custom_call->operands(), operands_stack_alloca.begin(),
+                    [this](HloInstruction* instr) {
+                      llvm_ir::IrArray ir_array(GetIrArrayFor(instr));
+                      return GetAllocaAndEmitMemrefInfo(b_, ir_array);
+                    });
+  for (int i = 0; i < num_operands; ++i) {
+    args_val = b_.CreateInsertValue(args_val, operands_stack_alloca[i].value,
+                                    arg_indx++);
+  }
+  TF_RET_CHECK(nargs == arg_indx)
+      << "Number of arguments don't equal the last argument index.";
+
+  llvm::Value* args_ptr = llvm_ir::EmitAllocaAtFunctionEntry(
+      ptr_array_type, "convolution.args", &b_);
+  b_.CreateLifetimeStart(args_ptr, b_.getInt64(-1));
+  b_.CreateStore(args_val, args_ptr);
+
+  TF_RETURN_IF_ERROR(EmitTargetAddressForOp(custom_call));
+  llvm_ir::IrArray result_array = GetIrArrayFor(custom_call);
+  auto result_stack_alloca = GetAllocaAndEmitMemrefInfo(b_, result_array);
+
+  EmitCallToFunc(runtime::kOneDnnConvolutionSymbolName,
+                 {result_stack_alloca.value, args_ptr}, b_.getVoidTy());
+
+  // Lifetime ends for all stack allocations.
+  b_.CreateLifetimeEnd(nargs_ptr, b_.getInt64(-1));
+  for (int i = 0; i < num_operands; ++i) {
+    operands_stack_alloca[i].EmitLifetimeEnd();
+  }
+  b_.CreateLifetimeEnd(args_ptr, b_.getInt64(-1));
+  result_stack_alloca.EmitLifetimeEnd();
+
+  return absl::OkStatus();
+}
+
+absl::Status IrEmitter::HandleOneDnnLayerNorm(HloInstruction* custom_call) {
+  //      args[0]: ptr to nargs
+  //      args[1]: ptr to ExecutableRunOptions
+  //      args[2]: ptr to OneDnnNormConfig
+  //      args[3...]: ptrs to operands
+
+  // First three arguments: nargs, ExecutableRunOptions, and
+  // OneDnnNormConfig.
   const int nargs_offset = 3;
   const int num_operands = custom_call->operand_count();
   const int nargs = nargs_offset + num_operands;
@@ -2732,10 +2819,10 @@ absl::Status IrEmitter::HandleOneDnnLayerNorm(HloInstruction* custom_call) {
   llvm::Value* run_opts_val = GetExecutableRunOptionsArgument();
   args_val = b_.CreateInsertValue(args_val, run_opts_val, arg_indx++);
 
-  // Insert OneDnnLayerNormConfig.
+  // Insert OneDnnNormConfig.
   auto typed_custom_call = Cast<HloCustomCallInstruction>(custom_call);
   auto backend_config = typed_custom_call->backend_config<BackendConfig>();
-  OneDnnLayerNormConfig ln_config;
+  OneDnnNormConfig ln_config;
   ln_config.CopyFrom(backend_config->onednn_layer_norm_config());
   std::string str_config;
   ln_config.SerializeToString(&str_config);
@@ -2830,6 +2917,9 @@ absl::Status IrEmitter::HandleCustomCall(HloInstruction* custom_call) {
   }
   if (custom_call->custom_call_target() == "__onednn$layernorm") {
     return HandleOneDnnLayerNorm(custom_call);
+  }
+  if (custom_call->custom_call_target() == "__onednn$convolution") {
+    return HandleOneDnnConvolution(custom_call);
   }
   if (custom_call->custom_call_target() == "__onednn$matmul_reorder") {
     return HandleOneDnnMatMulCalls(custom_call,
