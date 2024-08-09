@@ -57,8 +57,8 @@ limitations under the License.
 #include "xla/stream_executor/stream.h"
 #include "xla/test.h"
 #include "xla/tests/literal_test_util.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/lib/core/status_test_util.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/status.h"
@@ -70,7 +70,13 @@ namespace xla {
 namespace {
 
 using ::testing::ElementsAre;
+using ::testing::ElementsAreArray;
+using ::testing::Eq;
+using ::testing::FloatEq;
+using ::testing::Ge;
+using ::testing::Gt;
 using ::testing::HasSubstr;
+using ::testing::SizeIs;
 using ::tsl::testing::IsOkAndHolds;
 using ::tsl::testing::StatusIs;
 
@@ -579,6 +585,44 @@ TEST(StreamExecutorGpuClientTest, FromHostAsyncPinnedHost) {
   }
 }
 
+TEST(StreamExecutorGpuClientTest, FromHostAsyncPinnedHostChunked) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
+                          GetStreamExecutorGpuClient(GpuClientOptions()));
+  ASSERT_THAT(client->addressable_devices(), SizeIs(Gt(0)));
+  TF_ASSERT_OK_AND_ASSIGN(
+      PjRtMemorySpace * memspace,
+      client->addressable_devices()[0]->memory_space_by_kind(
+          PinnedHostMemorySpace::kKind));
+  std::vector<float> data{1, 3, 5, 7, 11, 13, 17, 19};
+  Shape shape = ShapeUtil::MakeShape(F32, {static_cast<int64_t>(data.size())});
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager> txm,
+      client->CreateBuffersForAsyncHostToDevice({shape}, memspace));
+  std::unique_ptr<PjRtBuffer> buf = txm->RetrieveBuffer(0);
+  ASSERT_THAT(buf->GetReadyFuture().IsReady(), Eq(false));
+
+  absl::string_view raw_view(reinterpret_cast<char*>(data.data()),
+                             data.size() * sizeof(data[0]));
+  int offset = 0;
+  while (true) {
+    int end = offset + 3;  // unaligned chunk size
+    if (end > raw_view.size()) {
+      end = raw_view.size();
+    }
+    int sz = end - offset;
+    bool reaches_end = end == raw_view.size();
+    TF_ASSERT_OK(txm->TransferRawDataToSubBuffer(
+        /*buffer_index=*/0, raw_view.data() + offset, offset, sz, reaches_end,
+        /*on_done=*/[]() {}));
+    if (reaches_end) {
+      break;
+    }
+    offset = end;
+  }
+  TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<Literal> lit, buf->ToLiteralSync());
+  EXPECT_THAT(lit->data<float>(), ElementsAreArray(data));
+}
+
 TEST(StreamExecutorGpuClientTest, CopyRawToHostFullBuffer) {
   TF_ASSERT_OK_AND_ASSIGN(auto client,
                           GetStreamExecutorGpuClient(GpuClientOptions()));
@@ -774,13 +818,15 @@ TEST(GpuTopology, ToProto) {
                            /*platform_version=*/"platform_version",
                            /*num_slices=*/2,
                            /*num_hosts_per_slice=*/1,
-                           /*num_devices_per_host=*/3);
+                           /*num_devices_per_host=*/3,
+                           /*core_count_per_chip=*/10);
   GpuTopologyProto msg = gpu_topology.ToProto();
   EXPECT_THAT(msg.device_ids(), ElementsAre(3, 2, 1));
   EXPECT_THAT(msg.platform_version(), "platform_version");
   EXPECT_THAT(msg.num_slices(), 2);
   EXPECT_THAT(msg.num_hosts_per_slice(), 1);
   EXPECT_THAT(msg.num_devices_per_host(), 3);
+  EXPECT_THAT(msg.core_count_per_chip(), 10);
 }
 
 TEST(StreamExecutorGpuClientTest, DistributedInit) {
@@ -909,6 +955,63 @@ TEST(StreamExecutorGpuClientTest, CopyToPinnedHostMemorySpace) {
   std::vector<int32_t> expected{1, 2, 3, 4};
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<int32_t>(expected),
                                      *literal));
+}
+
+TEST(StreamExecutorGpuClientTest, OpaqueDeviceMemoryDataPointer) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
+                          GetStreamExecutorGpuClient(GpuClientOptions()));
+  ASSERT_THAT(client->addressable_devices(), SizeIs(Gt(0)));
+  PjRtDevice* device = client->addressable_devices()[0];
+  TF_ASSERT_OK_AND_ASSIGN(
+      PjRtMemorySpace * memspace,
+      device->memory_space_by_kind(PinnedHostMemorySpace::kKind));
+
+  // Create a pinned_host buffer
+  std::vector<float> float_data{12.0, 34.0, 56.0, 78.0};
+  Shape shape = ShapeUtil::MakeShapeWithType<float>({4});
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtBuffer> buf,
+      client->BufferFromHostBuffer(
+          static_cast<const void*>(float_data.data()), shape.element_type(),
+          shape.dimensions(), /*byte_strides=*/std::nullopt,
+          PjRtClient::HostBufferSemantics::kImmutableOnlyDuringCall,
+          /*on_done_with_host_buffer=*/nullptr, memspace,
+          /*device_layout=*/nullptr));
+  ASSERT_THAT(buf->IsOnCpu(), true);
+  TF_ASSERT_OK_AND_ASSIGN(size_t buf_sz, buf->GetOnDeviceSizeInBytes());
+  ASSERT_THAT(buf_sz, Ge(sizeof(float) * 4));
+
+  // Check that OpaqueDeviceMemoryDataPointer() points to actual data
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtBuffer::ExternalReference> ref,
+                          buf->AcquireExternalReference());
+  TF_ASSERT_OK(buf->GetReadyFuture().Await());
+  const float* float_ptr =
+      reinterpret_cast<const float*>(ref->OpaqueDeviceMemoryDataPointer());
+  EXPECT_THAT(*float_ptr, FloatEq(12.0));
+  EXPECT_THAT(*(float_ptr + 1), FloatEq(34.0));
+  EXPECT_THAT(*(float_ptr + 2), FloatEq(56.0));
+  EXPECT_THAT(*(float_ptr + 3), FloatEq(78.0));
+
+  // Copy raw to device using OpaqueDeviceMemoryDataPointer(), and then read
+  // back to host; expect to get back the same data
+  TF_ASSERT_OK_AND_ASSIGN(PjRtMemorySpace * default_ms,
+                          device->default_memory_space());
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager> txm,
+      client->CreateBuffersForAsyncHostToDevice({shape}, default_ms));
+  TF_ASSERT_OK(txm->TransferRawDataToBuffer(
+      /*buffer_index=*/0,
+      absl::string_view(
+          static_cast<const char*>(ref->OpaqueDeviceMemoryDataPointer()),
+          buf_sz),
+      /*on_done=*/[]() {}));
+  std::unique_ptr<PjRtBuffer> hbm_buf = txm->RetrieveBuffer(0);
+  EXPECT_THAT(hbm_buf->GetOnDeviceSizeInBytes(), IsOkAndHolds(buf_sz));
+  EXPECT_THAT(hbm_buf->HostShape(), IsOkAndHolds(shape));
+  TF_ASSERT_OK(hbm_buf->GetReadyFuture().Await());
+  TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::Literal> literal,
+                          hbm_buf->ToLiteralSync());
+  EXPECT_THAT(literal->data<float>(), ElementsAreArray(float_data));
 }
 
 namespace {
@@ -1178,6 +1281,64 @@ TEST(StreamExecutorGpuClientTest, MlirParameterLayoutFromOptionsIsSetInHlo) {
   auto first_param_layout =
       modules[0]->entry_computation_layout().parameter_layout(0).layout();
   EXPECT_EQ(first_param_layout, Layout({0, 2, 1}));
+}
+
+TEST(StreamExecutorGpuClientTest,
+     MlirResultHostMemorySpaceIsSetInHloWithShardingPropagation) {
+  constexpr absl::string_view mlir_mul_explicit_sharding_layout_and_memory =
+      R"mlir(
+  module @jit_f attributes {
+      mhlo.num_partitions = 2 : i32,
+      mhlo.num_replicas = 1 : i32
+  } {
+    func.func public @main(%arg0: tensor<8x2xi32> {
+            mhlo.layout_mode = "{1,0}",
+            mhlo.memory_kind = "device",
+            mhlo.sharding = "{devices=[1,2]<=[2]}"
+        }) -> (tensor<8x2xi32> {
+            jax.result_info = "",
+            mhlo.layout_mode = "{0,1}",
+            mhlo.memory_kind = "pinned_host"
+        }) {
+      %c = stablehlo.constant dense<2> : tensor<i32>
+      %0 = stablehlo.broadcast_in_dim %c, dims = []
+          : (tensor<i32>) -> tensor<8x2xi32>
+      %1 = stablehlo.multiply %arg0, %0 : tensor<8x2xi32>
+      %2 = stablehlo.custom_call @Sharding(%1) {
+              mhlo.sharding = "{devices=[1,2]<=[2]}"
+          } : (tensor<8x2xi32>) -> tensor<8x2xi32>
+      %3 = stablehlo.custom_call @annotate_device_placement(%2) {
+              has_side_effect = true,
+              mhlo.frontend_attributes = {
+                  _xla_buffer_placement = "pinned_host"
+              }
+          } : (tensor<8x2xi32>) -> tensor<8x2xi32>
+      return %3 : tensor<8x2xi32>
+    }
+  })mlir";
+
+  mlir::MLIRContext context;
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, xla::ParseMlirModuleString(
+                       mlir_mul_explicit_sharding_layout_and_memory, context));
+  TF_ASSERT_OK_AND_ASSIGN(auto client,
+                          GetStreamExecutorGpuClient(GpuClientOptions()));
+
+  xla::CompileOptions options;
+  options.executable_build_options.set_num_partitions(2)
+      .set_use_spmd_partitioning(true)
+      .set_allow_spmd_sharding_propagation_to_output({true});
+
+  TF_ASSERT_OK_AND_ASSIGN(auto executable, client->Compile(*module, options));
+  TF_ASSERT_OK_AND_ASSIGN(auto modules, executable->GetHloModules());
+
+  auto first_param_layout =
+      modules[0]->entry_computation_layout().parameter_layout(0).layout();
+  EXPECT_EQ(first_param_layout.memory_space(), Layout::kDefaultMemorySpace);
+  auto result_layout =
+      modules[0]->entry_computation_layout().result_layout().layout();
+  EXPECT_EQ(result_layout,
+            Layout({0, 1}).set_memory_space(Layout::kHostMemorySpace));
 }
 
 }  // namespace

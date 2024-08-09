@@ -25,6 +25,7 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/ir_emitter2.h"
@@ -80,6 +81,18 @@ class ThunkEmitter {
   absl::StatusOr<ThunkSequence> EmitConcatenateKernelThunk(
       const HloInstruction* instruction);
 
+  absl::StatusOr<ThunkSequence> EmitGetDimensionSizeThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitSetDimensionSizeThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitBatchNormGradThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitBatchNormTrainingThunk(
+      const HloInstruction* instruction);
+
   absl::StatusOr<ThunkSequence> EmitConvolutionThunk(
       const HloInstruction* instruction);
 
@@ -87,6 +100,9 @@ class ThunkEmitter {
       const HloInstruction* instruction);
 
   absl::StatusOr<ThunkSequence> EmitElementalKernelThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitPadKernelThunk(
       const HloInstruction* instruction);
 
   absl::StatusOr<ThunkSequence> EmitFftThunk(const HloInstruction* instruction);
@@ -103,6 +119,9 @@ class ThunkEmitter {
       const HloInstruction* instruction);
 
   absl::StatusOr<ThunkSequence> EmitRngGetAndUpdateStateThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitStochasticConvertThunk(
       const HloInstruction* instruction);
 
   absl::StatusOr<ThunkSequence> EmitInfeedThunk(
@@ -143,7 +162,22 @@ class ThunkEmitter {
   absl::StatusOr<ThunkSequence> EmitCustomCallThunk(
       const HloInstruction* instruction);
 
+  absl::StatusOr<ThunkSequence> EmitSliceToDynamicThunk(
+      const HloInstruction* instruction);
+
   absl::StatusOr<ThunkSequence> EmitSelectAndScatterThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitTopKThunk(
+      const HloCustomCallInstruction* custom_call);
+
+  absl::StatusOr<ThunkSequence> EmitSliceThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitDynamicUpdateSliceThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitSortThunk(
       const HloInstruction* instruction);
 
   // Returns the list of buffer allocation slices assigned to the given

@@ -36,10 +36,10 @@ limitations under the License.
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
-#include "mlir/IR/AffineExpr.h"  // from @llvm-project
-#include "mlir/IR/AffineMap.h"  // from @llvm-project
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "mlir/Support/LLVM.h"  // from @llvm-project
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/AffineMap.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/Support/LLVM.h"
 #include "xla/service/gpu/model/affine_map_printer.h"
 #include "xla/service/gpu/model/indexing_map.h"
 
@@ -602,23 +602,8 @@ std::optional<SizeAndStrideExpression> ExtractSizeAndStride(
     AffineExpr strided_indexing, absl::Span<Interval const> dimension_intervals,
     absl::Span<Interval const> symbol_intervals) {
   MLIRContext* ctx = strided_indexing.getContext();
-  // Deal with the symbol case (capturing a whole untiled dimension).
-  // TODO(b/330906085): concatenating across a reduction dimension needs to be
-  // handled by this code.
-  if (auto symbol = llvm::dyn_cast<AffineSymbolExpr>(strided_indexing)) {
-    const Interval& symbol_interval = symbol_intervals[symbol.getPosition()];
-    if (symbol_interval.lower != 0) {
-      return std::nullopt;
-    }
-
-    return SizeAndStrideExpression(
-        /*size=*/getAffineConstantExpr(symbol_interval.upper + 1, ctx),
-        /*stride=*/getAffineConstantExpr(1, ctx));
-  }
-
   AffineMapPrinter printer;
 
-  // TODO(b/328427138): support multivariate size expressions.
   switch (strided_indexing.getKind()) {
     case AffineExprKind::DimId:
       return SizeAndStrideExpression(/*size=*/strided_indexing,
@@ -626,23 +611,15 @@ std::optional<SizeAndStrideExpression> ExtractSizeAndStride(
     case mlir::AffineExprKind::Mul: {
       const auto mul = llvm::cast<mlir::AffineBinaryOpExpr>(strided_indexing);
       AffineExpr lhs = mul.getLHS();
-      // The stride may not be fully collapsed if it is negative; in that case,
-      // we need to extract the negative multiplier first.
-      if (const auto rhs = llvm::dyn_cast<AffineConstantExpr>(mul.getRHS());
-          rhs && rhs.getValue() == -1) {
-        std::optional<SizeAndStrideExpression> maybe_size_and_stride =
-            ExtractSizeAndStride(lhs, dimension_intervals, symbol_intervals);
-        if (!maybe_size_and_stride.has_value()) {
-          return std::nullopt;
-        }
-
-        return SizeAndStrideExpression(
-            /*size=*/maybe_size_and_stride->size,
-            /*stride=*/maybe_size_and_stride->stride * rhs);
+      std::optional<SizeAndStrideExpression> maybe_size_and_stride =
+          ExtractSizeAndStride(lhs, dimension_intervals, symbol_intervals);
+      if (!maybe_size_and_stride.has_value()) {
+        return std::nullopt;
       }
-      CHECK(lhs.getKind() == AffineExprKind::DimId);
-      return SizeAndStrideExpression(/*size=*/lhs,
-                                     /*stride=*/mul.getRHS());
+
+      return SizeAndStrideExpression(
+          /*size=*/maybe_size_and_stride->size,
+          /*stride=*/maybe_size_and_stride->stride * mul.getRHS());
     }
     case mlir::AffineExprKind::Mod: {
       auto mod = llvm::cast<mlir::AffineBinaryOpExpr>(strided_indexing);
@@ -656,15 +633,18 @@ std::optional<SizeAndStrideExpression> ExtractSizeAndStride(
     case mlir::AffineExprKind::Constant:
       return SizeAndStrideExpression(/*size=*/getAffineConstantExpr(1, ctx),
                                      /*stride=*/getAffineConstantExpr(0, ctx));
-    case mlir::AffineExprKind::SymbolId:
-      VLOG(1) << "Encountered complex size expression involving symbol "
-              << printer.ToString(strided_indexing);
-      // It's currently not checked separately, but RTVars shouldn't appear in
-      // the strided indexing expressions.
-      return std::nullopt;
+    case mlir::AffineExprKind::SymbolId: {
+      auto symbol = llvm::cast<AffineSymbolExpr>(strided_indexing);
+      const Interval& symbol_interval = symbol_intervals[symbol.getPosition()];
+      if (symbol_interval.lower != 0) {
+        return std::nullopt;
+      }
+
+      return SizeAndStrideExpression(
+          /*size=*/getAffineConstantExpr(symbol_interval.upper + 1, ctx),
+          /*stride=*/getAffineConstantExpr(1, ctx));
+    }
     case mlir::AffineExprKind::Add: {
-      // TODO(b/328427138): this should only be necessary in the multivariate
-      // case, and will be implemented later.
       std::optional<std::vector<SizeAndStrideExpression>>
           maybe_sizes_and_strides =
               ExtractSizesAndStridesFromMultivariateSummation(
@@ -1138,8 +1118,7 @@ std::string SymbolicTile::RtVarsToString(
     const AffineMapPrinter& printer) const {
   std::string s;
   std::stringstream ss(s);
-  PrintRTVars(tile_map_.GetRTVars(),
-              /*first_rt_var_symbol_index=*/tile_map_.GetDimensionCount(), ss,
+  PrintRTVars(tile_map_.GetRTVars(), /*first_rt_var_symbol_index=*/0, ss,
               printer);
   return ss.str();
 }
@@ -1163,9 +1142,7 @@ void SymbolicTile::Print(std::ostream& out,
   const std::vector<RTVar>& rt_vars = tile_map_.GetRTVars();
   if (!rt_vars.empty()) {
     out << "\n\trt_vars: ";
-    PrintRTVars(rt_vars,
-                /*first_rt_var_symbol_index=*/tile_map_.GetDimensionCount(),
-                out, printer);
+    PrintRTVars(rt_vars, /*first_rt_var_symbol_index=*/0, out, printer);
   }
   if (!constraints_.IsAlwaysSatisfied()) {
     out << "\n\tconstraints: ";

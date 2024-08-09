@@ -41,11 +41,11 @@ limitations under the License.
 #include "xla/stream_executor/blas.h"
 #include "xla/stream_executor/cuda/cuda_blas.h"
 #include "xla/stream_executor/cuda/cuda_blas_utils.h"
+#include "xla/stream_executor/event_based_timer.h"
 #include "xla/stream_executor/gpu/gpu_activation.h"
 #include "xla/stream_executor/gpu/gpu_blas_lt.h"
 #include "xla/stream_executor/gpu/gpu_helpers.h"
 #include "xla/stream_executor/gpu/gpu_stream.h"
-#include "xla/stream_executor/gpu/gpu_timer.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/types.h"
 #include "xla/util.h"
@@ -124,6 +124,7 @@ absl::StatusOr<cublasLtEpilogue_t> AsCublasLtEpilogue(
       return CUBLASLT_EPILOGUE_BIAS;
     case gpu::BlasLt::Epilogue::kBiasThenReLU:
       return CUBLASLT_EPILOGUE_RELU_BIAS;
+#if CUDA_VERSION >= 11040
     case gpu::BlasLt::Epilogue::kGELU:
       return CUBLASLT_EPILOGUE_GELU;
     case gpu::BlasLt::Epilogue::kGELUWithAux:
@@ -132,6 +133,13 @@ absl::StatusOr<cublasLtEpilogue_t> AsCublasLtEpilogue(
       return CUBLASLT_EPILOGUE_GELU_BIAS;
     case gpu::BlasLt::Epilogue::kBiasThenGELUWithAux:
       return CUBLASLT_EPILOGUE_GELU_AUX_BIAS;
+#else
+    case gpu::BlasLt::Epilogue::kGELU:
+    case gpu::BlasLt::Epilogue::kGELUWithAux:
+    case gpu::BlasLt::Epilogue::kBiasThenGELU:
+    case gpu::BlasLt::Epilogue::kBiasThenGELUWithAux:
+      return absl::InternalError("GELU epilogues require cublasLt >= 11.4");
+#endif
   }
 }
 
@@ -398,11 +406,11 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
     std::optional<DeviceMemoryBase> workspace,
     std::optional<ScratchAllocator*> scratch_allocator,
     blas::ProfileResult* profile_result = nullptr) const {
-  TF_ASSIGN_OR_RETURN(
-      std::optional<gpu::GpuTimer> timer,
-      gpu::GpuTimer::CreateIfNeeded(
-          stream, profile_result && profile_result->warmup_run_executed(),
-          profile_result != nullptr));
+  std::unique_ptr<EventBasedTimer> timer;
+  if (profile_result != nullptr) {
+    TF_ASSIGN_OR_RETURN(timer, stream->CreateEventBasedTimer(
+                                   profile_result->warmup_run_executed()));
+  }
 
   void* workspace_addr;
   uint64_t workspace_size = 0;
@@ -429,6 +437,7 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
       TF_RETURN_IF_ERROR(SetAttr(
           op_desc_.get(), CUBLASLT_MATMUL_DESC_BIAS_POINTER, bias.opaque()));
     }
+#if CUDA_VERSION >= 11080
     if (a_scale != nullptr) {
       TF_RETURN_IF_ERROR(SetAttr(op_desc_.get(),
                                  CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
@@ -454,8 +463,16 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
                                  CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
                                  d_amax.opaque()));
     }
+#else
+    if (a_scale != nullptr || b_scale != nullptr || c_scale != nullptr ||
+        d_scale != nullptr || d_amax != nullptr) {
+      return absl::InternalError(
+          "A/B/C/D scales and amax require cublasLt >= 11.8");
+    }
+#endif
 
     if (aux != nullptr) {
+#if CUDA_VERSION >= 11040
       TF_RETURN_IF_ERROR(SetAttr(op_desc_.get(),
                                  CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER,
                                  aux.opaque()));
@@ -478,6 +495,10 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
       TF_RETURN_IF_ERROR(SetAttr(op_desc_.get(),
                                  CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_BATCH_STRIDE,
                                  output_batch_stride));
+#else
+      return absl::InternalError(
+          "Auxiliary inputs / outputs require cublasLt >= 11.4");
+#endif
     }
 
     gpu::ScopedActivateExecutorContext sac{blas_lt_ref_.parent_};
@@ -508,6 +529,7 @@ namespace {
 template <cudaDataType_t CudaT>
 struct CudaToNativeT;
 
+#if CUDA_VERSION >= 11080
 template <>
 struct CudaToNativeT<CUDA_R_8F_E4M3> {
   using type = tsl::float8_e4m3fn;
@@ -516,6 +538,7 @@ template <>
 struct CudaToNativeT<CUDA_R_8F_E5M2> {
   using type = tsl::float8_e5m2;
 };
+#endif
 
 template <>
 struct CudaToNativeT<CUDA_R_16BF> {
@@ -569,6 +592,7 @@ absl::Status BlasLt::MatmulPlan::ExecuteOnStream(
         profile_result);                                                    \
   }
 
+#if CUDA_VERSION >= 11080
   // FP8 compatible type combinations (see cuBLASLt documentation):
   TYPED_MATMUL(float, CUDA_R_8F_E4M3, CUDA_R_8F_E4M3, CUDA_R_16BF, CUDA_R_16BF)
   TYPED_MATMUL(float, CUDA_R_8F_E4M3, CUDA_R_8F_E4M3, CUDA_R_16BF,
@@ -601,6 +625,7 @@ absl::Status BlasLt::MatmulPlan::ExecuteOnStream(
                CUDA_R_8F_E5M2)
   TYPED_MATMUL(float, CUDA_R_8F_E5M2, CUDA_R_8F_E4M3, CUDA_R_16F, CUDA_R_16F)
   TYPED_MATMUL(float, CUDA_R_8F_E5M2, CUDA_R_8F_E4M3, CUDA_R_32F, CUDA_R_32F)
+#endif
 
   // Other data types:
   TYPED_MATMUL(float, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF)

@@ -2,6 +2,7 @@ load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(
     "@local_tsl//tsl/platform:build_config.bzl",
     "tf_proto_library",
+    # copybara:uncomment "tf_pyclif_proto_library",
 )
 load("@local_tsl//tsl/platform:rules_cc.bzl", "cc_library")
 load(
@@ -244,6 +245,7 @@ cc_library(
     deps = [
         ":statusor",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/base:log_severity",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@local_tsl//tsl/platform:logging",
@@ -302,6 +304,7 @@ cc_library(
     deps = [
         ":types",
         ":util",
+        "@com_google_absl//absl/base:core_headers",
     ],
 )
 
@@ -314,6 +317,7 @@ xla_cc_test(
         ":util",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/numeric:bits",
+        "@local_tsl//tsl/platform:ml_dtypes",
         "@local_tsl//tsl/platform:test_main",
     ],
 )
@@ -336,6 +340,7 @@ cc_library(
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/base:log_severity",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/container:inlined_vector",
@@ -627,13 +632,13 @@ xla_cc_test(
         ":types",
         ":util",
         ":xla_data_proto_cc",
+        "//xla/tsl/lib/core:status_test_util",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/hash",
         "@com_google_absl//absl/random",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
-        "@local_tsl//tsl/lib/core:status_test_util",
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:logging",
         "@local_tsl//tsl/platform:macros",
@@ -676,6 +681,22 @@ cc_library(
     name = "error_spec",
     hdrs = ["error_spec.h"],
     visibility = internal_visibility([":friends"]),
+    deps = [":xla_data_proto_cc"],
+)
+
+xla_cc_test(
+    name = "literal_comparison_test",
+    srcs = ["literal_comparison_test.cc"],
+    deps = [
+        ":error_spec",
+        ":literal_comparison",
+        ":literal_util",
+        ":test_helpers",
+        "//xla/tsl/lib/core:status_test_util",
+        "@com_google_googletest//:gtest_main",
+        "@local_tsl//tsl/platform:ml_dtypes",
+        "@local_tsl//tsl/platform:test_main",
+    ],
 )
 
 cc_library(
@@ -685,13 +706,13 @@ cc_library(
     visibility = internal_visibility([":friends"]),
     deps = [
         ":error_spec",
+        ":fp_util",
         ":literal",
         ":literal_util",
         ":shape_util",
         ":types",
         ":util",
         ":xla_data_proto_cc",
-        "@com_google_absl//absl/base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
@@ -748,6 +769,9 @@ xla_cc_test(
     deps = [
         ":array",
         ":test",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+        "@eigen_archive//:eigen3",
         "@local_tsl//tsl/platform:test_main",
     ],
 )
@@ -771,6 +795,7 @@ xla_cc_test(
     deps = [
         ":array2d",
         ":test",
+        "@eigen_archive//:eigen3",
         "@local_tsl//tsl/platform:ml_dtypes",
         "@local_tsl//tsl/platform:test_main",
     ],
@@ -816,9 +841,12 @@ xla_cc_test(
     name = "array4d_test",
     srcs = ["array4d_test.cc"],
     deps = [
+        ":array2d",
         ":array4d",
         ":test",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/types:span",
+        "@eigen_archive//:eigen3",
         "@local_tsl//tsl/platform:test_main",
     ],
 )
@@ -932,7 +960,7 @@ xla_cc_test(
         ":test_helpers",
         ":text_literal_writer",
         ":types",
-        "@local_tsl//tsl/lib/core:status_test_util",
+        "//xla/tsl/lib/core:status_test_util",
         "@local_tsl//tsl/platform:env",
         "@local_tsl//tsl/platform:test_main",
     ],
@@ -1020,7 +1048,9 @@ cc_library(
         ":array2d",
         ":array3d",
         ":array4d",
+        ":literal",
         ":literal_util",
+        ":shape_util",
         ":util",
         ":window_util",
         ":xla_data_proto_cc",
@@ -1028,9 +1058,11 @@ cc_library(
         "//xla/client:xla_builder",
         "//xla/hlo/evaluator:hlo_evaluator",
         "//xla/hlo/ir:hlo",
+        "//xla/service:hlo_module_config",
         "//xla/service:shape_inference",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/types:span",
         "@local_tsl//tsl/lib/math:math_util",
         "@local_tsl//tsl/platform:logging",
@@ -1044,7 +1076,9 @@ xla_cc_test(
         ":array2d",
         ":array3d",
         ":array4d",
+        ":error_spec",
         ":literal",
+        ":literal_util",
         ":reference_util",
         ":test",
         ":xla_data_proto_cc",
@@ -1198,6 +1232,14 @@ xla_py_proto_library(
     ],
 )
 
+# copybara:uncomment_begin(google-only)
+# tf_pyclif_proto_library(
+#     name = "autotune_results_pyclif",
+#     proto_lib = ":autotune_results_proto",
+#     visibility = ["//visibility:public"],
+# )
+# copybara:uncomment_end
+
 tf_proto_library(
     name = "autotuning_proto",
     srcs = ["autotuning.proto"],
@@ -1230,6 +1272,7 @@ xla_cc_test(
     srcs = ["autotune_result_wrapper_test.cc"],
     deps = [
         ":autotune_result_wrapper",
+        ":autotune_results_proto_cc",
         ":autotuning_proto_cc",
         ":test",
         ":test_helpers",
@@ -1273,6 +1316,33 @@ cc_library(
 cc_library(
     name = "empty",
     visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "sort_json",
+    srcs = ["sort_json.cc"],
+    hdrs = ["sort_json.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@local_tsl//tsl/platform:errors",
+        "@local_tsl//tsl/platform:statusor",
+    ],
+)
+
+xla_cc_test(
+    name = "sort_json_test",
+    srcs = ["sort_json_test.cc"],
+    deps = [
+        ":sort_json",
+        "@com_google_googletest//:gtest_main",
+        "@local_tsl//tsl/platform:status_matchers",
+        "@local_tsl//tsl/platform:test",
+        "@local_tsl//tsl/platform:test_main",
+    ],
 )
 
 # Needed to workaround https://github.com/bazelbuild/bazel/issues/21519

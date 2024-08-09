@@ -37,6 +37,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "xla/hlo/ir/hlo_clone_context.h"
+#include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
@@ -1102,6 +1103,19 @@ HloInstruction* HloComputation::CreateCallInstruction(
   return call_instruction;
 }
 
+HloInstruction* HloComputation::CreateCompositeCallInstruction(
+    absl::Span<HloInstruction* const> instructions_to_call,
+    const std::string& name, const std::string& attributes, int64_t version) {
+  HloInstruction* root = instructions_to_call.front();
+  HloInstruction* call_instruction =
+      AddInstruction(HloInstruction::CreateCompositeCall(
+                         root->shape(), root, name, attributes, version),
+                     root->name());
+  AppendInstructionsIntoCalledComputation(instructions_to_call,
+                                          call_instruction);
+  return call_instruction;
+}
+
 absl::StatusOr<HloInstruction*> HloComputation::CreateAsyncInstructions(
     HloInstruction* instruction, absl::Span<const Shape> context_shapes,
     absl::string_view async_execution_thread, bool replace,
@@ -1744,6 +1758,10 @@ std::unique_ptr<HloComputation> HloComputation::CloneInContext(
 
 void HloComputation::UniquifyName(NameUniquer* name_uniquer) {
   name_ = name_uniquer->GetUniqueName(name_);
+}
+
+void HloComputation::UniquifyName(HloModule* module) {
+  UniquifyName(&module->computation_name_uniquer());
 }
 
 HloInstruction* HloComputation::GetInstructionWithName(absl::string_view name) {

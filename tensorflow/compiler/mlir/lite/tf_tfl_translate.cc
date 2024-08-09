@@ -41,10 +41,10 @@ limitations under the License.
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
 #include "mlir/Support/FileUtilities.h"  // from @llvm-project
 #include "stablehlo/dialect/StablehloOps.h"  // from @stablehlo
-#include "tensorflow/cc/saved_model/loader.h"
 #include "tensorflow/compiler/mlir/init_mlir.h"
 #include "tensorflow/compiler/mlir/lite/common/tfl_pass_config.h"
 #include "tensorflow/compiler/mlir/lite/flatbuffer_export_flags.h"
+#include "tensorflow/compiler/mlir/lite/ir/tfl_ops.h"
 #include "tensorflow/compiler/mlir/lite/tf_tfl_translate_cl.h"
 #include "tensorflow/compiler/mlir/lite/tf_to_tfl_flatbuffer.h"
 #include "tensorflow/compiler/mlir/lite/transforms/passes.h"
@@ -55,6 +55,7 @@ limitations under the License.
 #include "xla/translate/hlo_to_mhlo/translate.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/errors.h"
+#include "tensorflow/lite/toco/toco_flags.pb.h"
 
 using mlir::MLIRContext;
 using mlir::ModuleOp;
@@ -96,8 +97,8 @@ int main(int argc, char **argv) {
     // back to do it properly in the future
     mlir::DialectRegistry registry;
     RegisterAllTensorFlowDialects(registry);
-    registry
-        .insert<mlir::func::FuncDialect, mlir::stablehlo::StablehloDialect>();
+    registry.insert<mlir::func::FuncDialect, mlir::stablehlo::StablehloDialect,
+                    mlir::TFL::TensorFlowLiteDialect>();
     context->appendDialectRegistry(registry);
   }
 
@@ -113,8 +114,6 @@ int main(int argc, char **argv) {
                     "`select-user-tf-ops` flag.";
     return kTrFailure;
   }
-
-  std::unique_ptr<tensorflow::SavedModelBundle> bundle;
 
   // TODO(b/147435528): We need to test the e2e behavior once the graph freezing
   // inside mlir is done.
@@ -146,7 +145,7 @@ int main(int argc, char **argv) {
     module = tensorflow::ImportSavedModel(
         input_file_name, saved_model_version, tags, extra_opdefs,
         exported_names, specs, /*enable_variable_lifting=*/true, context.get(),
-        &bundle);
+        /*saved_model_bundle=*/nullptr);
   } else if (import_hlo) {
     // HLO import path.
     std::string error;
@@ -255,8 +254,8 @@ int main(int argc, char **argv) {
   auto status = tensorflow::ConvertTFExecutorToTFLOrFlatbuffer(
       std::move(context), std::move(module.value()), toco_flags, pass_config,
       tags,
-      /*saved_model_dir=*/"", std::move(bundle), &result,
-      serialize_stablehlo_ops, /*output_mlir*/ output_mlir);
+      /*saved_model_dir=*/"", &result, serialize_stablehlo_ops,
+      /*export_to_mlir=*/output_mlir);
   if (!status.ok()) {
     llvm::errs() << status.message() << '\n';
     return kTrFailure;
