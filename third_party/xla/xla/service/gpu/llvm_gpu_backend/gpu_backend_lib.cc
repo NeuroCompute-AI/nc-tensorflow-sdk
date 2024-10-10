@@ -86,7 +86,7 @@ limitations under the License.
 #include "xla/tsl/util/env_var.h"
 #include "xla/util.h"
 #include "xla/xla.pb.h"
-#include "tsl/platform/cuda_libdevice_path.h"
+#include "tsl/platform/cuda_root_path.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
@@ -499,7 +499,6 @@ void NVPTXBackendInit(const DebugOptions& debug_options) {
   FeedLLVMWithFlags({
       "-slp-vectorize-hor=false",
       "-slp-max-reg-size=32",
-      "-slp-max-vf=4",
   });
 
   llvm_ir::InitializeLLVMCommandLineOptions(

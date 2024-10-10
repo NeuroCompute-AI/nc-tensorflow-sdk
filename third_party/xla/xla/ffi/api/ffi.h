@@ -27,7 +27,9 @@ limitations under the License.
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -71,10 +73,12 @@ enum class DataType : uint8_t {
   C128 = XLA_FFI_DataType_C128,
   TOKEN = XLA_FFI_DataType_TOKEN,
   F8E5M2 = XLA_FFI_DataType_F8E5M2,
+  F8E4M3 = XLA_FFI_DataType_F8E4M3,
   F8E4M3FN = XLA_FFI_DataType_F8E4M3FN,
   F8E4M3B11FNUZ = XLA_FFI_DataType_F8E4M3B11FNUZ,
   F8E5M2FNUZ = XLA_FFI_DataType_F8E5M2FNUZ,
   F8E4M3FNUZ = XLA_FFI_DataType_F8E4M3FNUZ,
+  F8E3M4 = XLA_FFI_DataType_F8E3M4,
 };
 
 // Create aliases in ::xla::ffi namespace for all DataTypes, for consistency
@@ -96,10 +100,12 @@ inline constexpr DataType C64 = DataType::C64;
 inline constexpr DataType C128 = DataType::C128;
 inline constexpr DataType TOKEN = DataType::TOKEN;
 inline constexpr DataType F8E5M2 = DataType::F8E5M2;
+inline constexpr DataType F8E4M3 = DataType::F8E4M3;
 inline constexpr DataType F8E4M3FN = DataType::F8E4M3FN;
 inline constexpr DataType F8E4M3B11FNUZ = DataType::F8E4M3B11FNUZ;
 inline constexpr DataType F8E5M2FNUZ = DataType::F8E5M2FNUZ;
 inline constexpr DataType F8E4M3FNUZ = DataType::F8E4M3FNUZ;
+inline constexpr DataType F8E3M4 = DataType::F8E3M4;
 
 inline std::ostream& operator<<(std::ostream& os, const DataType dtype) {
   return os << static_cast<XLA_FFI_DataType>(dtype);
@@ -115,10 +121,12 @@ constexpr size_t ByteWidth(DataType dtype) {
     case DataType::S8:
     case DataType::U8:
     case DataType::F8E5M2:
+    case DataType::F8E4M3:
     case DataType::F8E4M3FN:
     case DataType::F8E4M3B11FNUZ:
     case DataType::F8E5M2FNUZ:
     case DataType::F8E4M3FNUZ:
+    case DataType::F8E3M4:
       return 1;
     case DataType::S16:
     case DataType::U16:
@@ -1009,6 +1017,63 @@ struct ResultEncoding<ExecutionStage::kInstantiate,
     }
 
     return internal::CreateError(api, state.error());
+  }
+};
+
+// Encodes `Future` as an asynchronous FFI result.
+template <ExecutionStage stage>
+struct ResultEncoding<stage, Future> {
+  static std::variant<XLA_FFI_Error*, XLA_FFI_Future*> Encode(
+      const XLA_FFI_Api* api, XLA_FFI_ExecutionContext* ctx, Future future) {
+    // Create XLA_FFI_Future object that will signal completion to the runtime.
+    XLA_FFI_Future_Create_Args args;
+    args.struct_size = XLA_FFI_Future_Create_Args_STRUCT_SIZE;
+    args.extension_start = nullptr;
+    args.future = nullptr;
+
+    if (auto* err = api->XLA_FFI_Future_Create(&args)) {
+      return err;
+    }
+
+    assert(args.future != nullptr && "XLA_FFI_Future_Create failed");
+
+    future.OnReady([api, f = args.future](const std::optional<Error>& error) {
+      // When the OnReady callback is invoked, we no longer have access to the
+      // diagnostics, and can't signal an error to the runtime. We chose to
+      // abort execution, because otherwise it will lead to a deadlock. However
+      // we should never get to this point, because execution must be aborted on
+      // a synchronous path when checking XLA FFI version compatibility.
+      auto abort_on_error = [api](XLA_FFI_Error* err) {
+        if (XLA_FFI_PREDICT_TRUE(err == nullptr)) {
+          return;
+        }
+
+        std::cerr << "Failed to signal XLA_FFI_Future completion: "
+                  << internal::GetErrorMessage(api, err) << std::endl;
+        internal::DestroyError(api, err);
+        std::abort();
+      };
+
+      if (XLA_FFI_PREDICT_FALSE(error.has_value())) {
+        XLA_FFI_Future_SetError_Args args;
+        args.struct_size = XLA_FFI_Future_SetError_Args_STRUCT_SIZE;
+        args.extension_start = nullptr;
+        args.future = f;
+        args.error = internal::CreateError(api, *error);
+
+        abort_on_error(api->XLA_FFI_Future_SetError(&args));
+
+      } else {
+        XLA_FFI_Future_SetAvailable_Args args;
+        args.struct_size = XLA_FFI_Future_SetAvailable_Args_STRUCT_SIZE;
+        args.extension_start = nullptr;
+        args.future = f;
+
+        abort_on_error(api->XLA_FFI_Future_SetAvailable(&args));
+      }
+    });
+
+    return args.future;
   }
 };
 

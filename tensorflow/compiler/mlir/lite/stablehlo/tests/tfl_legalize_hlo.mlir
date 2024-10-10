@@ -2751,8 +2751,8 @@ func.func @complex_abs(%arg0: tensor<2xcomplex<f32>>) -> tensor<2xf32> {
   func.return %0 : tensor<2xf32>
 }
 
-// CHECK-NOT: tfl
-
+// CHECK: %0 = "tfl.complex_abs"(%arg0) : (tensor<2xcomplex<f32>>) -> tensor<2xf32>
+// CHECK: return %0 : tensor<2xf32>
 // -----
 
 func.func @is_finite(%arg0: tensor<2xf32>) -> tensor<2xi1> {
@@ -3328,6 +3328,19 @@ func.func @broadcast_add(%arg0: tensor<1x1xf32>, %arg1: tensor<1x1000xf32>) -> (
 
 // -----
 
+// CHECK-LABEL: broadcast_add_cst
+func.func @broadcast_add_cst(%arg1: tensor<1x1000xf32>) -> (tensor<1x1000xf32>, tensor<1x1000xf32>) {
+  %cst = mhlo.constant dense<1.200000e+01> : tensor<f32>
+  %0 = "mhlo.broadcast_in_dim"(%cst) <{broadcast_dimensions = dense<> : tensor<0xi64>}> : (tensor<f32>) -> tensor<1x1000xf32>
+  %1 = mhlo.add %0, %arg1 : tensor<1x1000xf32>
+  %2 = mhlo.add %arg1, %0 : tensor<1x1000xf32>
+  func.return %1, %2 : tensor<1x1000xf32>, tensor<1x1000xf32>
+}
+
+// CHECK: tfl.add{{.*}}(tensor<1x1000xf32>, tensor<f32>) -> tensor<1x1000xf32>
+
+// -----
+
 // CHECK-LABEL: broadcast_div
 func.func @broadcast_div(%arg0: tensor<1x1xf32>, %arg1: tensor<1x1000xf32>) -> (tensor<1x1000xf32>, tensor<1x1000xf32>) {
   %0 = "mhlo.broadcast_in_dim"(%arg0) <{broadcast_dimensions = dense<[0, 1]> : tensor<2xi64>}> : (tensor<1x1xf32>) -> tensor<1x1000xf32>
@@ -3623,3 +3636,36 @@ func.func @if(%arg0: tensor<i1>, %arg1: tensor<i32>, %arg2: tensor<i32>) -> (ten
 // CHECK:   "tfl.yield"(%2) : (tensor<i32>) -> ()
 // CHECK: }) : (tensor<i1>) -> tensor<i32>
 // CHECK: return %1 : tensor<i32>
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// mhlo.fft
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: rfft_2d
+func.func @rfft_2d(%arg0: tensor<1x512xf32>) -> tensor<1x257xcomplex<f32>> {
+  %0 = "mhlo.fft"(%arg0) <{fft_length = dense<512> : tensor<1xi64>, fft_type = #mhlo<fft_type RFFT>}> : (tensor<1x512xf32>) -> tensor<1x257xcomplex<f32>>
+  func.return %0 : tensor<1x257xcomplex<f32>>
+}
+
+// CHECK: %cst = arith.constant dense<-2> : tensor<i32>
+// CHECK: %0 = "tfl.expand_dims"(%arg0, %cst) : (tensor<1x512xf32>, tensor<i32>) -> tensor<1x1x512xf32>
+// CHECK-DAG: %cst_0 = arith.constant dense<1> : tensor<1xi32>
+// CHECK-DAG: %cst_1 = arith.constant dense<512> : tensor<1xi32>
+// CHECK: %1 = "tfl.concatenation"(%cst_0, %cst_1) <{axis = 0 : i32, fused_activation_function = "NONE"}> : (tensor<1xi32>, tensor<1xi32>) -> tensor<2xi32>
+// CHECK: %2 = "tfl.rfft2d"(%0, %1) : (tensor<1x1x512xf32>, tensor<2xi32>) -> tensor<1x1x257xcomplex<f32>>
+// CHECK: %3 = "tfl.squeeze"(%2) <{squeeze_dims = [-2]}> : (tensor<1x1x257xcomplex<f32>>) -> tensor<1x257xcomplex<f32>>
+// CHECK: return %3 : tensor<1x257xcomplex<f32>>
+
+// -----
+
+// CHECK-LABEL: @fft
+func.func @fft(%arg0: tensor<3x9xcomplex<f32>>) -> tensor<3x9xcomplex<f32>> {
+  %0 = "mhlo.fft"(%arg0) <{ fft_length = dense<9> : tensor<1xi64>, fft_type = #mhlo<fft_type FFT> }> : (tensor<3x9xcomplex<f32>>) -> tensor<3x9xcomplex<f32>>
+  func.return %0 : tensor<3x9xcomplex<f32>>
+}
+
+// CHECK: %0 = "mhlo.fft"(%arg0) <{fft_length = dense<9> : tensor<1xi64>, fft_type = #mhlo<fft_type FFT>}> : (tensor<3x9xcomplex<f32>>) -> tensor<3x9xcomplex<f32>>
+// CHECK: return %0 : tensor<3x9xcomplex<f32>>
+

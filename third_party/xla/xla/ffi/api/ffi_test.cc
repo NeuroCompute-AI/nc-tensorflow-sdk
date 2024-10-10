@@ -23,6 +23,7 @@ limitations under the License.
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "absl/log/check.h"
@@ -38,6 +39,8 @@ limitations under the License.
 #include "xla/primitive_util.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
+#include "xla/tsl/concurrency/async_value_ref.h"
+#include "xla/tsl/concurrency/chain.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/env.h"
@@ -127,11 +130,13 @@ TEST(FfiTest, DataTypeEnumValue) {
   EXPECT_EQ(encoded(PrimitiveType::TOKEN), encoded(DataType::TOKEN));
 
   EXPECT_EQ(encoded(PrimitiveType::F8E5M2), encoded(DataType::F8E5M2));
+  EXPECT_EQ(encoded(PrimitiveType::F8E4M3), encoded(DataType::F8E4M3));
   EXPECT_EQ(encoded(PrimitiveType::F8E4M3FN), encoded(DataType::F8E4M3FN));
   EXPECT_EQ(encoded(PrimitiveType::F8E4M3B11FNUZ),
             encoded(DataType::F8E4M3B11FNUZ));
   EXPECT_EQ(encoded(PrimitiveType::F8E5M2FNUZ), encoded(DataType::F8E5M2FNUZ));
   EXPECT_EQ(encoded(PrimitiveType::F8E4M3FNUZ), encoded(DataType::F8E4M3FNUZ));
+  EXPECT_EQ(encoded(PrimitiveType::F8E3M4), encoded(DataType::F8E3M4));
 }
 
 TEST(FfiTest, DataTypeByteWidth) {
@@ -176,6 +181,8 @@ TEST(FfiTest, DataTypeByteWidth) {
 
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E5M2),
             ByteWidth(DataType::F8E5M2));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E4M3),
+            ByteWidth(DataType::F8E4M3));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E4M3FN),
             ByteWidth(DataType::F8E4M3FN));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E4M3B11FNUZ),
@@ -184,6 +191,8 @@ TEST(FfiTest, DataTypeByteWidth) {
             ByteWidth(DataType::F8E5M2FNUZ));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E4M3FNUZ),
             ByteWidth(DataType::F8E4M3FNUZ));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E3M4),
+            ByteWidth(DataType::F8E3M4));
 }
 
 TEST(FfiTest, ErrorEnumValue) {
@@ -444,6 +453,25 @@ TEST(FfiTest, WrongTypeBufferArgument) {
       status,
       StatusIs(absl::StatusCode::kInvalidArgument,
                HasSubstr("Wrong buffer dtype: expected F32 but got S32")));
+}
+
+TEST(FfiTest, WrongNumberOfArguments) {
+  CallFrameBuilder::AttributesBuilder attrs;
+  attrs.Insert("foo", 42);
+  attrs.Insert("bar", 43);
+
+  CallFrameBuilder builder(/*num_args=*/0, /*num_rets=*/0);
+  builder.AddAttributes(attrs.Build());
+  auto call_frame = builder.Build();
+
+  auto handler =
+      Ffi::Bind().Attr<int>("foo").To([](int foo) { return Error::Success(); });
+  auto status = Call(*handler, call_frame);
+
+  EXPECT_THAT(status, StatusIs(absl::StatusCode::kInvalidArgument,
+                               HasSubstr("Wrong number of attributes")));
+  EXPECT_THAT(status.message(), HasSubstr("foo"));
+  EXPECT_THAT(status.message(), HasSubstr("bar"));
 }
 
 TEST(FfiTest, TokenArgument) {
@@ -819,10 +847,10 @@ TEST(FfiTest, AttrsAsDictionary) {
 }
 
 TEST(FfiTest, DictionaryAttr) {
-  CallFrameBuilder::FlatAttributesMap dict0;
+  CallFrameBuilder::AttributesMap dict0;
   dict0.try_emplace("i32", 42);
 
-  CallFrameBuilder::FlatAttributesMap dict1;
+  CallFrameBuilder::AttributesMap dict1;
   dict1.try_emplace("f32", 42.0f);
 
   CallFrameBuilder::AttributesBuilder attrs;
@@ -861,7 +889,7 @@ TEST(FfiTest, DictionaryAttr) {
 }
 
 TEST(FfiTest, StructAttr) {
-  CallFrameBuilder::FlatAttributesMap dict;
+  CallFrameBuilder::AttributesMap dict;
   dict.try_emplace("i32", 42);
   dict.try_emplace("f32", 42.0f);
 
@@ -974,7 +1002,7 @@ TEST(FfiTest, EnumAttr) {
 }
 
 TEST(FfiTest, WrongEnumAttrType) {
-  CallFrameBuilder::FlatAttributesMap dict;
+  CallFrameBuilder::AttributesMap dict;
   dict.try_emplace("i32", 42);
 
   CallFrameBuilder::AttributesBuilder attrs;
@@ -1178,6 +1206,49 @@ TEST(FfiTest, ThreadPool) {
   TF_ASSERT_OK(status);
 }
 
+TEST(FfiTest, AsyncHandler) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+  Eigen::ThreadPoolDevice device(pool.AsEigenThreadPool(), pool.NumThreads());
+
+  int32_t value = 0;
+
+  // Handler completes execution asynchronously on a given thread pool.
+  auto fn = [&](ThreadPool thread_pool) -> Future {
+    Promise promise;
+    Future future(promise);
+
+    thread_pool.Schedule([&, promise = std::move(promise)]() mutable {
+      value = 42;
+      promise.SetAvailable();
+    });
+
+    return future;
+  };
+
+  auto handler = Ffi::Bind().Ctx<ThreadPool>().To(fn);
+  CallFrame call_frame =
+      CallFrameBuilder(/*num_args=*/0, /*num_rets=*/0).Build();
+
+  CallOptions options;
+  options.backend_options = CallOptions::CpuOptions{&device};
+
+  {  // Synchronous call.
+    absl::Status status = Call(*handler, call_frame, options);
+    TF_ASSERT_OK(status);
+    EXPECT_EQ(value, 42);
+  }
+
+  value = 0;  // reset value between calls
+
+  {  // Asynchronous call.
+    tsl::AsyncValueRef<tsl::Chain> async_value =
+        CallAsync(*handler, call_frame, options);
+    tsl::BlockUntilReady(async_value);
+    ASSERT_TRUE(async_value.IsConcrete());
+    EXPECT_EQ(value, 42);
+  }
+}
+
 TEST(FfiTest, Metadata) {
   auto api = GetXlaFfiApi();
   auto handler = Ffi::BindTo([]() { return Error::Success(); });
@@ -1260,6 +1331,27 @@ void BM_AnyBufferArgX4(benchmark::State& state) {
 }
 
 BENCHMARK(BM_AnyBufferArgX4);
+
+//===----------------------------------------------------------------------===//
+// BM_AsyncAnyBufferArgX1
+//===----------------------------------------------------------------------===//
+
+void BM_AsyncAnyBufferArgX1(benchmark::State& state) {
+  auto call_frame = WithBufferArgs(1).Build();
+
+  auto handler = Ffi::Bind().Arg<AnyBuffer>().To([](auto buffer) {
+    benchmark::DoNotOptimize(buffer);
+    Promise promise;
+    promise.SetAvailable();
+    return Future(promise);
+  });
+
+  for (auto _ : state) {
+    CHECK_OK(Call(*handler, call_frame));
+  }
+}
+
+BENCHMARK(BM_AsyncAnyBufferArgX1);
 
 //===----------------------------------------------------------------------===//
 // BM_BufferArgX1

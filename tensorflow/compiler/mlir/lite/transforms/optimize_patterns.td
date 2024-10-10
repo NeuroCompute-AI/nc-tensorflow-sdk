@@ -1441,6 +1441,23 @@ def MatchGelu : Pat<
    (HasOneUse $mul_out1),
   ]>;
 
+// For Gelu, replaces
+//   0.5 * x * ( erfc( -x * sqrt_1_2 ) )
+def MatchGeluWithErfc : Pat<
+  (TFL_MulOp
+   (TFL_MulOp:$mul_out $arg0, (Arith_ConstantOp F32ElementsAttr:$Cst_1_2), TFL_AF_None),
+   (TF_ErfcOp:$erfc_out
+    (TFL_MulOp:$mul_out1
+     (TFL_NegOp $arg0),
+     (Arith_ConstantOp F32ElementsAttr:$Cst_sqrt_1_2), TFL_AF_None)), TFL_AF_None),
+  (TFL_GeluOp $arg0, ConstBoolAttrFalse),
+  [(FloatValueEquals<"0.5"> $Cst_1_2),
+   (FloatValueEquals<"0.707106769"> $Cst_sqrt_1_2),
+   (HasOneUse $mul_out),
+   (HasOneUse $erfc_out),
+   (HasOneUse $mul_out1),
+  ]>;
+
 // Fetches the output of FC op, from the provided arguments.
 def GetFcOutput : NativeCodeCall<
   "GetFcOutput(&$_builder, $0, $1, $2, $3, $4, $5, $6, $7)">;
@@ -1579,10 +1596,13 @@ def FuseReshapesAroundBatchMatMulLHS: Pat<
   (TFL_BatchMatMulOp $input, $rhs, $adj_x, $adj_y, $bool_attr),
   [(HasRank<2> $rhs),
    (HasRank<2> $initial_shape_change),
+   (AnyStaticShapeTensor $input),
+   (AnyStaticShapeTensor $initial_shape_change),
+   (AnyStaticShapeTensor $final_shape_change),
    (TrailingDimValuesEqual $input, $initial_shape_change),
+   (AreTensorSubSectionShapesEqual<0, 1> $input, $final_shape_change),
    (NonBroadcastingNonContractingLhsDimsProductEqual<0> $input, $initial_shape_change),
-   (NonBroadcastingNonContractingLhsDimsProductEqual<0> $final_shape_change, $bmm_tmp_output),
-   (AreTensorSubSectionShapesEqual<0, 1> $input, $final_shape_change)]>;
+   (NonBroadcastingNonContractingLhsDimsProductEqual<0> $final_shape_change, $bmm_tmp_output)]>;
 
 // Pattern to fuse/fold the reshape of TFL_BatchMatMulOp output to expand the
 // dimensions of the output to add a unity broadcast dimension.
@@ -1606,6 +1626,9 @@ def FuseOutputReshape_BatchMatMulWithFlattenedContractingDims: Pat<
   [(HasRankAtLeast<4> $input),
    (HasRank<2> $rhs),
    (HasRank<2> $initial_shape_change),
+   (AnyStaticShapeTensor $input),
+   (AnyStaticShapeTensor $initial_shape_change),
+   (AnyStaticShapeTensor $final_shape_change),
    (IsBroadcastDimEqualToOne $input),
    (IsBroadcastDimEqualToOne $final_shape_change),
    (ContractingDimsProductEqual<2> $input, $initial_shape_change),
@@ -1632,6 +1655,9 @@ def FuseInputReshape_BatchMatMulWithFlattenedRhsDims: Pat<
   [(HasRank<2> $rhs),
    (HasRank<3> $input),
    (HasRank<2> $initial_shape_change),
+   (AnyStaticShapeTensor $input),
+   (AnyStaticShapeTensor $initial_shape_change),
+   (AnyStaticShapeTensor $final_shape_change),
    (IsBroadcastDimEqualToOne $input),
    (TrailingDimValuesEqual $input, $initial_shape_change),
    (NonBroadcastingNonContractingLhsDimsProductEqual<0,1> $input, $initial_shape_change),
@@ -1650,12 +1676,15 @@ def FuseReshapesAroundBatchMatMulLHS1: Pat<
   [(HasRankAtLeast<3> $input),
    (HasRank<3> $rhs),
    (HasRank<3> $initial_shape_change),
+   (AnyStaticShapeTensor $input),
+   (AnyStaticShapeTensor $initial_shape_change),
+   (AnyStaticShapeTensor $final_shape_change),
    (IsBroadcastDimEqualToOne $rhs),
    (IsBroadcastDimEqualToOne $input),
    (TrailingDimValuesEqual $input, $initial_shape_change),
+   (AreTensorSubSectionShapesEqual<1, 1> $input, $final_shape_change),
    (NonBroadcastingNonContractingLhsDimsProductEqual<1> $input, $initial_shape_change),
-   (NonBroadcastingNonContractingLhsDimsProductEqual<1> $final_shape_change, $bmm_tmp_output),
-   (AreTensorSubSectionShapesEqual<1, 1> $input, $final_shape_change)]>;
+   (NonBroadcastingNonContractingLhsDimsProductEqual<1> $final_shape_change, $bmm_tmp_output)]>;
 
 
 
@@ -1696,7 +1725,7 @@ def FuseTransposeIntoBatchMatMulRHS: Pat<
    (IsBoolAttrEqual<"false"> $adj_x),
    (IsBoolAttrEqual<"false"> $adj_y)]>;
 
-// Fuse broadcasting LHS reshape into tfl.fully_connected.
+// Fuse squeezing LHS reshape into tfl.fully_connected.
 // This will work for any FullyConnected(Reshape(LHS), RHS), provided-
 // 1.The reshape is only squeezing the broadcast dimensions of the LHS.
 // 2. Rank after reshape is 2.
@@ -1704,7 +1733,7 @@ def FuseTransposeIntoBatchMatMulRHS: Pat<
 // Ex- [1,  128, 32] -> [128, 32] or [1, 1, 1, 128, 32] -> [128, 32]
 //
 // We should be able to set keep_num_dims=False and fold the reshape.
-def FuseBroadcastingReshapeIntoFC_LHS: Pat<
+def FuseSqueezingLhsReshapeIntoFC_Output: Pat<
   (TFL_FullyConnectedOp:$results
     (TFL_ReshapeOp:$reshaped_input $input, (Arith_ConstantOp $s)),
     $filter, $bias, $fused_activation_function, $weights_format,
@@ -1713,6 +1742,8 @@ def FuseBroadcastingReshapeIntoFC_LHS: Pat<
     $input, $filter, $bias, $fused_activation_function, $weights_format,
     ConstBoolAttrFalse, $asymmetric_quantize_inputs),
   [(IsBoolAttrEqual<"true"> $keep_num_dims),
+   (AnyStaticShapeTensor $input),
+   (AnyStaticShapeTensor $reshaped_input),
    (HasRankAtLeast<3> $input),
    (HasRank<2> $reshaped_input),
    (HasRank<2> $filter),

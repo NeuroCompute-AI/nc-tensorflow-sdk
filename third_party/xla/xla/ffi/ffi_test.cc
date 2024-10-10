@@ -37,12 +37,19 @@ limitations under the License.
 #include "xla/ffi/ffi_api.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/stream.h"
+#include "xla/tsl/concurrency/async_value_ref.h"
+#include "xla/tsl/concurrency/chain.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/xla_data.pb.h"
+#include "tsl/platform/env.h"
 #include "tsl/platform/status_matchers.h"
 #include "tsl/platform/statusor.h"
 #include "tsl/platform/test.h"
 #include "tsl/platform/test_benchmark.h"
+#include "tsl/platform/threadpool.h"
+
+#define EIGEN_USE_THREADS
+#include "unsupported/Eigen/CXX11/Tensor"
 
 namespace xla::ffi {
 
@@ -191,8 +198,10 @@ TEST(FfiTest, WrongNumAttrs) {
 
   auto status = Call(*handler, call_frame);
 
-  ASSERT_EQ(status.message(),
-            "Wrong number of attributes: expected 1 but got 2");
+  EXPECT_THAT(
+      status,
+      StatusIs(absl::StatusCode::kInvalidArgument,
+               HasSubstr("Wrong number of attributes: expected 1 but got 2")));
 }
 
 TEST(FfiTest, BuiltinAttributes) {
@@ -372,10 +381,10 @@ TEST(FfiTest, AttrsAsDictionary) {
 }
 
 TEST(FfiTest, DictionaryAttr) {
-  CallFrameBuilder::FlatAttributesMap dict0;
+  CallFrameBuilder::AttributesMap dict0;
   dict0.try_emplace("i32", 42);
 
-  CallFrameBuilder::FlatAttributesMap dict1;
+  CallFrameBuilder::AttributesMap dict1;
   dict1.try_emplace("f32", 42.0f);
 
   CallFrameBuilder::AttributesBuilder attrs;
@@ -414,7 +423,7 @@ TEST(FfiTest, DictionaryAttr) {
 }
 
 TEST(FfiTest, StructAttr) {
-  CallFrameBuilder::FlatAttributesMap dict;
+  CallFrameBuilder::AttributesMap dict;
   dict.try_emplace("i32", 42);
   dict.try_emplace("f32", 42.0f);
 
@@ -999,6 +1008,48 @@ TEST(FfiTest, AllowRegisterDuplicateWhenEqual) {
   TF_ASSERT_OK(status);
 }
 
+TEST(FfiTest, AsyncHandler) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+  Eigen::ThreadPoolDevice device(pool.AsEigenThreadPool(), pool.NumThreads());
+
+  int32_t value = 0;
+
+  // Handler completes execution asynchronously on a given thread pool.
+  auto fn = [&](const Eigen::ThreadPoolDevice* device) {
+    auto async_value = tsl::MakeConstructedAsyncValueRef<tsl::Chain>();
+
+    device->enqueueNoNotification([&, async_value]() mutable {
+      value = 42;
+      async_value.SetStateConcrete();
+    });
+
+    return async_value;
+  };
+
+  auto handler = Ffi::Bind().Ctx<IntraOpThreadPool>().To(fn);
+  CallFrame call_frame =
+      CallFrameBuilder(/*num_args=*/0, /*num_rets=*/0).Build();
+
+  CallOptions options;
+  options.backend_options = CallOptions::CpuOptions{&device};
+
+  {  // Synchronous call.
+    absl::Status status = Call(*handler, call_frame, options);
+    TF_ASSERT_OK(status);
+    EXPECT_EQ(value, 42);
+  }
+
+  value = 0;  // reset value between calls
+
+  {  // Asynchronous call.
+    tsl::AsyncValueRef<tsl::Chain> async_value =
+        CallAsync(*handler, call_frame, options);
+    tsl::BlockUntilReady(async_value);
+    ASSERT_TRUE(async_value.IsConcrete());
+    EXPECT_EQ(value, 42);
+  }
+}
+
 TEST(FfiTest, Metadata) {
   static constexpr auto* noop = +[] { return absl::OkStatus(); };
   XLA_FFI_DEFINE_HANDLER(handler, noop, Ffi::Bind());
@@ -1118,6 +1169,31 @@ void BM_AnyBufferArgX8(benchmark::State& state) {
 }
 
 BENCHMARK(BM_AnyBufferArgX8);
+
+//===----------------------------------------------------------------------===//
+// BM_AsyncAnyBufferArgX1
+//===----------------------------------------------------------------------===//
+
+void BM_AsyncAnyBufferArgX1(benchmark::State& state) {
+  auto call_frame = WithBufferArgs(1).Build();
+
+  static tsl::AsyncValueOwningRef<tsl::Chain>* done = [] {
+    auto* storage = new tsl::internal::AsyncValueStorage<tsl::Chain>();
+    return new tsl::AsyncValueOwningRef<tsl::Chain>(
+        tsl::MakeAvailableAsyncValueRef<tsl::Chain>(*storage));
+  }();
+
+  auto handler = Ffi::Bind().Arg<AnyBuffer>().To([&](auto buffer) {
+    benchmark::DoNotOptimize(buffer);
+    return done->AsRef();
+  });
+
+  for (auto _ : state) {
+    CHECK_OK(Call(*handler, call_frame));
+  }
+}
+
+BENCHMARK(BM_AsyncAnyBufferArgX1);
 
 //===----------------------------------------------------------------------===//
 // BM_BufferArgX1
