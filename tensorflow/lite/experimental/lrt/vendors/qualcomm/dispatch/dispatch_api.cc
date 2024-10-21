@@ -33,16 +33,14 @@
 namespace {
 
 using ::litert::qnn::QnnManager;
-using ::litert::qnn::SetupAll;
 
 static constexpr const int VERSION_MAJOR = 0;
 static constexpr const int VERSION_MINOR = 1;
 static constexpr const int VERSION_PATCH = 0;
 
-QnnManager& Qnn() {
-  static QnnManager qnn_manager;
-  return qnn_manager;
-}
+static std::unique_ptr<QnnManager> TheQnnManager;
+
+QnnManager& Qnn() { return *TheQnnManager; }
 
 char BuildId[256];
 
@@ -50,10 +48,19 @@ char BuildId[256];
 // Basic Execution API
 // /////////////////////////////////////////////////////////////////////////////
 
-LiteRtStatus Initialize() {
-  LITERT_RETURN_STATUS_IF_NOT_OK(SetupAll(/*soc_model=*/std::nullopt, Qnn(),
-                                          /*load_system=*/true,
-                                          /*load_context=*/false));
+LiteRtStatus Initialize(const char* shared_library_dir) {
+  std::optional<std::string> shared_library_dir_opt =
+      shared_library_dir ? std::make_optional(std::string(shared_library_dir))
+                         : std::nullopt;
+
+  auto configs = QnnManager::DefaultBackendConfigs();
+  if (auto qnn_manager = QnnManager::Create(configs, shared_library_dir_opt);
+      !qnn_manager.ok()) {
+    ABSL_LOG(ERROR) << qnn_manager.status();
+    return kLiteRtStatusErrorRuntimeFailure;
+  } else {
+    std::swap(TheQnnManager, *qnn_manager);
+  }
 
   Qnn_ApiVersion_t qnn_api_version;
   if (auto status = Qnn().Api()->backendGetApiVersion(&qnn_api_version);
@@ -183,6 +190,7 @@ LiteRtStatus InvocationContextCreate(
     return kLiteRtStatusErrorRuntimeFailure;
   }
   *invocation_context = context->release();
+  device_context->SetInvocationContext(*invocation_context);
   return kLiteRtStatusOk;
 }
 

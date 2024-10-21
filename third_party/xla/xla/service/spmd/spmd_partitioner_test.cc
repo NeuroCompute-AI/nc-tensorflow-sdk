@@ -41,12 +41,12 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/hlo/pass/hlo_pass_pipeline.h"
+#include "xla/hlo/transforms/sharding_format_picker.h"
 #include "xla/hlo/utils/hlo_matchers.h"
 #include "xla/hlo/utils/hlo_sharding_util.h"
 #include "xla/layout_util.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/hlo_verifier.h"
-#include "xla/service/sharding_format_picker.h"
 #include "xla/service/spmd/spmd_prepare.h"
 #include "xla/shape.h"
 #include "xla/tests/hlo_test_base.h"
@@ -9577,12 +9577,10 @@ ENTRY entry {
       AllOf(op::Shape("f32[4,8]"),
             op::Copy(op::DynamicSlice(op::Parameter(0), op::Reshape(),
                                       op::Constant())));
-  auto table_look_up =
-      AllOf(op::Shape("s32[]"),
-            op::Reshape(op::DynamicSlice(op::Constant(), op::PartitionId())));
-  auto tiled = AllOf(op::Shape("f32[4,4]"),
-                     op::Copy(op::DynamicSlice(partially_replicated,
-                                               op::Constant(), table_look_up)));
+  auto tiled =
+      AllOf(op::Shape("f32[4,4]"),
+            op::Copy(op::DynamicSlice(partially_replicated, op::Subtract(),
+                                      op::Subtract())));
   const auto root = module->entry_computation()->root_instruction();
   EXPECT_THAT(root, tiled);
 }
@@ -9636,12 +9634,10 @@ ENTRY entry {
       AllOf(op::Shape("f32[4,8]"),
             op::Copy(op::DynamicSlice(op::Parameter(0), op::Reshape(),
                                       op::Constant())));
-  auto table_look_up =
-      AllOf(op::Shape("s32[]"),
-            op::Reshape(op::DynamicSlice(op::Constant(), op::PartitionId())));
-  auto tiled = AllOf(op::Shape("f32[4,4]"),
-                     op::Copy(op::DynamicSlice(partially_replicated,
-                                               op::Constant(), table_look_up)));
+  auto tiled =
+      AllOf(op::Shape("f32[4,4]"),
+            op::Copy(op::DynamicSlice(partially_replicated, op::Subtract(),
+                                      op::Subtract())));
   const auto root = module->entry_computation()->root_instruction();
   EXPECT_THAT(root, tiled);
 }
@@ -9695,13 +9691,10 @@ ENTRY entry {
       AllOf(op::Shape("f32[8,4]"),
             op::Copy(op::DynamicSlice(op::Parameter(0), op::Constant(),
                                       op::Reshape())));
-  auto table_look_up =
-      AllOf(op::Shape("s32[]"),
-            op::Reshape(op::DynamicSlice(op::Constant(), op::PartitionId())));
   auto tiled =
       AllOf(op::Shape("f32[4,4]"),
             op::Copy(op::CollectivePermute(op::DynamicSlice(
-                partially_replicated, table_look_up, op::Constant()))));
+                partially_replicated, op::Subtract(), op::Subtract()))));
   const auto root = module->entry_computation()->root_instruction();
   EXPECT_THAT(root, tiled);
 }
@@ -10392,13 +10385,10 @@ ENTRY entry {
       op::Copy(op::DynamicSlice(op::Parameter(), op::Reshape(), op::Constant(),
                                 op::Constant(), op::Constant())),
       op::Shape("f32[8,801,1,1024]"));
-  auto table_look_up =
-      AllOf(op::Shape("s32[]"),
-            op::Reshape(op::DynamicSlice(op::Constant(), op::PartitionId())));
   auto resharded_lhs =
       AllOf(op::Reshape(op::Transpose(op::AllToAll(op::Reshape(
-                op::Pad(op::DynamicSlice(lhs, op::Constant(), op::Constant(),
-                                         op::Constant(), table_look_up),
+                op::Pad(op::DynamicSlice(lhs, op::Subtract(), op::Subtract(),
+                                         op::Subtract(), op::Subtract()),
                         op::Constant()))))),
             op::Shape("f32[16,401,1,512]"));
   auto left_halo = AllOf(op::Shape("f32[16,2, 1, 512]"),

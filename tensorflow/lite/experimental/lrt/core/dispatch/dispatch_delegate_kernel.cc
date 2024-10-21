@@ -74,10 +74,9 @@ DispatchDelegateKernel::~DispatchDelegateKernel() {
 
 absl::StatusOr<DispatchDelegateKernel::Ptr> DispatchDelegateKernel::Create(
     std::string&& graph_name, const LiteRtDispatchDelegateOptions& options) {
-  auto dispatch_api_lib_path =
-      options.GetOption(LiteRtDispatchDelegateOptions::kDispatchApiLibPath);
-  if (auto status = LiteRtDispatchInitialize(dispatch_api_lib_path.has_value()
-                                                 ? dispatch_api_lib_path->data()
+  auto shared_library_dir = options.GetSharedLibraryDir();
+  if (auto status = LiteRtDispatchInitialize(shared_library_dir.has_value()
+                                                 ? shared_library_dir->data()
                                                  : nullptr);
       status != kLiteRtStatusOk) {
     LITERT_LOG(LITERT_ERROR, "Failed to initialize Dispatch API: %d", status);
@@ -260,7 +259,7 @@ TfLiteStatus DispatchDelegateKernel::SetBuffer(
 
   // Check if we can reuse a cached tensor buffer or we need to create a new
   // one.
-  if (cached_tensor_buffer.IsValid()) {
+  if (static_cast<bool>(cached_tensor_buffer)) {
     if (auto cached_tensor_type = cached_tensor_buffer.TensorType();
         !cached_tensor_type.ok()) {
       LITERT_LOG(LITERT_ERROR, "%s",

@@ -26,9 +26,8 @@ cc_library(
     ],
     deps = [
         "//tensorflow/lite/experimental/lrt/c:litert_c_api",
-        "//tensorflow/lite/experimental/lrt/c:litert_tensor_buffer_c_api",
+        "//tensorflow/lite/experimental/lrt/c:litert_tensor_buffer",
         "//tensorflow/lite/experimental/lrt/core:logging",
-        "//tensorflow/lite/experimental/lrt/core:tensor_buffer",
         "//tensorflow/lite/experimental/lrt/core:utils",
         "//tensorflow/lite/experimental/lrt/vendors/c:litert_dispatch_c_api",
         "@com_google_absl//absl/base",
@@ -36,6 +35,7 @@ cc_library(
         "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
     ],
@@ -60,11 +60,10 @@ cc_library(
         "//tensorflow/lite/delegates/utils:simple_opaque_delegate",
         "//tensorflow/lite/experimental/lrt/c:litert_c_api",
         "//tensorflow/lite/experimental/lrt/c:litert_dispatch_delegate",
-        "//tensorflow/lite/experimental/lrt/c:litert_tensor_buffer_c_api",
+        "//tensorflow/lite/experimental/lrt/c:litert_tensor_buffer",
         "//tensorflow/lite/experimental/lrt/cc:litert_cc_api",
-        "//tensorflow/lite/experimental/lrt/cc:litert_tensor_buffer_cc_api",
+        "//tensorflow/lite/experimental/lrt/cc:litert_tensor_buffer",
         "//tensorflow/lite/experimental/lrt/core:logging",
-        "//tensorflow/lite/experimental/lrt/core:tensor_buffer",
         "//tensorflow/lite/experimental/lrt/core:tfl_utils",
         "//tensorflow/lite/experimental/lrt/core:utils",
         "//tensorflow/lite/experimental/lrt/vendors/c:litert_dispatch_c_api",
@@ -83,10 +82,10 @@ cc_library(
 )
 
 cc_test(
-    name = "dispatch_delegate_pixel_test",
-    srcs = ["dispatch_delegate_pixel_test.cc"],
+    name = "dispatch_delegate_google_tensor_test",
+    srcs = ["dispatch_delegate_google_tensor_test.cc"],
     data = [
-        "//tensorflow/lite/experimental/lrt/vendors/pixel/dispatch:dispatch_api_shared",
+        "//tensorflow/lite/experimental/lrt/vendors/google_tensor/dispatch:dispatch_api_shared",
     ],
     linkopts = select({
         "//tensorflow:android": ["-landroid"],

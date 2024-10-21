@@ -4242,7 +4242,8 @@ absl::Status AlgebraicSimplifierVisitor::HandleGather(HloInstruction* gather) {
         PaddingConfig pad_config;
         for (int64_t i = 0; i != gather->shape().rank(); ++i) {
           auto dimension = pad_config.add_dimensions();
-          if (reshape_dims_to_padded_dims.contains(
+          if (gather_operand_passthrough_output_to_operand_dims.contains(i) &&
+              reshape_dims_to_padded_dims.contains(
                   gather_operand_passthrough_output_to_operand_dims[i])) {
             int64_t padded_dim = reshape_dims_to_padded_dims
                 [gather_operand_passthrough_output_to_operand_dims[i]];
@@ -4331,6 +4332,11 @@ absl::Status AlgebraicSimplifierVisitor::HandleMaximum(
     HloInstruction* maximum) {
   HloInstruction *lhs, *rhs;
   CHECK(Match(maximum, m::Maximum(m::Op(&lhs), m::Op(&rhs))));
+
+  // max(x, x) -> x
+  if (lhs == rhs) {
+    return ReplaceInstruction(maximum, lhs);
+  }
 
   // max(x, -inf) -> x
   PrimitiveType ty = maximum->shape().element_type();
@@ -4431,6 +4437,11 @@ absl::Status AlgebraicSimplifierVisitor::HandleMinimum(
     HloInstruction* minimum) {
   HloInstruction *lhs, *rhs;
   CHECK(Match(minimum, m::Minimum(m::Op(&lhs), m::Op(&rhs))));
+
+  // min(x, x) -> x
+  if (lhs == rhs) {
+    return ReplaceInstruction(minimum, lhs);
+  }
 
   // min(x, inf) -> x
   PrimitiveType ty = minimum->shape().element_type();
