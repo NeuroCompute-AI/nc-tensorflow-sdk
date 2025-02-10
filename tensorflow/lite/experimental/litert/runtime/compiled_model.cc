@@ -65,9 +65,7 @@ using litert::Unexpected;
 using litert::internal::ExternalLiteRtBufferContext;
 
 Expected<void> LiteRtCompiledModelT::Initialize() {
-  // Use BuiltinOpResolverWithoutDefaultDelegates to avoid auto applying of
-  // Xnnpack delegate with GetSignatureRunner() API.
-  tflite::ops::builtin::BuiltinOpResolverWithoutDefaultDelegates resolver;
+  tflite::ops::builtin::BuiltinOpResolver resolver;
   tflite::InterpreterBuilder(*fb_model_, resolver)(&interp_);
   if (interp_ == nullptr) {
     return Unexpected(kLiteRtStatusErrorRuntimeFailure);
@@ -258,7 +256,7 @@ tflite::SignatureRunner* LiteRtCompiledModelT::GetSignatureRunner(
 }
 
 Expected<void> LiteRtCompiledModelT::RegisterBuffer(
-    tflite::SignatureRunner* runner, const TfLiteTensor* tensor,
+    tflite::SignatureRunner* runner, TfLiteTensor* tensor,
     const char* tensor_name, LiteRtTensorBuffer buffer, bool is_input,
     std::vector<LiteRtTensorBuffer>& locked_buffers) {
   bool backend_requires_cpu_buffer = false;
@@ -281,6 +279,9 @@ Expected<void> LiteRtCompiledModelT::RegisterBuffer(
           return Unexpected(kLiteRtStatusErrorRuntimeFailure,
                             "Failed to register tensor buffer");
         }
+        // Mark the tensor as non-CPU to avoid TFLite from allocating it.
+        tensor->allocation_type = kTfLiteNonCpu;
+        tensor->data.data = nullptr;
         return {};
       }
       if (type == kLiteRtTensorBufferTypeHostMemory) {
@@ -340,7 +341,7 @@ Expected<void> LiteRtCompiledModelT::RegisterBuffer(
 Expected<void> LiteRtCompiledModelT::Run(
     absl::string_view signature_key,
     const std::vector<LiteRtTensorBuffer>& input_buffers,
-    const std::vector<LiteRtTensorBuffer>& output_buffers) {
+    const std::vector<LiteRtTensorBuffer>& output_buffers, bool& async) {
   auto runner = GetSignatureRunner(signature_key);
   if (runner == nullptr) {
     return Unexpected(kLiteRtStatusErrorNotFound,
@@ -363,23 +364,6 @@ Expected<void> LiteRtCompiledModelT::Run(
     if (litert_output_buffer->HasEvent()) {
       return Error(kLiteRtStatusErrorInvalidArgument,
                    "Output buffers cannot have events attached");
-    }
-  }
-
-  // TODO: If input buffers have events, we wait on them before we launch the
-  // inference. This is inefficient when using HW acceleration, since in that
-  // case it would be best to make the HW accelerator wait for those events as
-  // opposed to blocking the CPU here.
-  for (auto input_buffer : input_buffers) {
-    if (input_buffer->HasEvent()) {
-      auto litert_event = input_buffer->GetEvent();
-      if (!litert_event) {
-        return litert_event.Error();
-      }
-      litert::Event event(*litert_event, /*owned=*/false);
-      if (auto status = event.Wait(/*timeout_in_ms=*/-1); !status) {
-        return status.Error();
-      }
     }
   }
 
@@ -408,9 +392,9 @@ Expected<void> LiteRtCompiledModelT::Run(
   for (int i = 0; i < runner->output_names().size(); ++i) {
     const auto& output_name = runner->output_names()[i];
     auto* output_tensor = runner->output_tensor(output_name);
-    auto res =
-        RegisterBuffer(runner, output_tensor, output_name, output_buffers[i],
-                       /*is_input=*/false, locked_buffers);
+    auto res = RegisterBuffer(runner, const_cast<TfLiteTensor*>(output_tensor),
+                              output_name, output_buffers[i],
+                              /*is_input=*/false, locked_buffers);
     if (!res) {
       return Unexpected(
           kLiteRtStatusErrorRuntimeFailure,
@@ -428,13 +412,35 @@ Expected<void> LiteRtCompiledModelT::Run(
     return Unexpected(kLiteRtStatusErrorRuntimeFailure, "Failed to invoke");
   }
 
+  if (async) {
+    // If the caller requested async execution, then set async to true if any of
+    // the output buffers have been assigned a synchronization event.
+    async = false;
+    for (auto& tb : output_buffers) {
+      async |= tb->HasEvent();
+    }
+  } else {
+    // If the caller has not requested async execution, then wait on
+    // synchronization events that have been attached to the outputs.
+    for (auto& tb : output_buffers) {
+      if (tb->HasEvent()) {
+        auto event = tb->GetEvent();
+        if (auto status = litert::Event(*event, /*owned=*/false)
+                              .Wait(/*timeout_in_ms=*/-1);
+            !status) {
+          return status;
+        }
+      }
+    }
+  }
+
   return {};
 }
 
 litert::Expected<void> LiteRtCompiledModelT::RunCApi(
     size_t signature_index, size_t num_input_buffers,
     LiteRtTensorBuffer* input_buffers, size_t num_output_buffers,
-    LiteRtTensorBuffer* output_buffers) {
+    LiteRtTensorBuffer* output_buffers, bool* async) {
   if (signature_index >= signature_keys_.size()) {
     return litert::Unexpected(
         kLiteRtStatusErrorIndexOOB,
@@ -450,6 +456,11 @@ litert::Expected<void> LiteRtCompiledModelT::RunCApi(
   for (int i = 0; i < num_output_buffers; ++i) {
     output_buffers_vec.push_back(std::move(output_buffers[i]));
   }
-  return Run(*signature_keys_[signature_index], input_buffers_vec,
-             output_buffers_vec);
+  bool async_ = async ? *async : false;
+  auto result = Run(*signature_keys_[signature_index], input_buffers_vec,
+                    output_buffers_vec, async_);
+  if (async) {
+    *async = async_;
+  }
+  return result;
 }

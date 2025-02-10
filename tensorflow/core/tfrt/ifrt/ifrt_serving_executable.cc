@@ -30,6 +30,7 @@ limitations under the License.
 #include "absl/memory/memory.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
@@ -72,6 +73,9 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/framework/serving_device_selector.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/threadpool.h"
 #include "xla/xla_data.pb.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/example/feature.pb.h"
@@ -91,9 +95,6 @@ limitations under the License.
 #include "tensorflow/core/tfrt/ifrt/ifrt_tensor_utils.h"
 #include "tensorflow/core/tfrt/ifrt/sharding_utils.h"
 #include "tensorflow/core/tfrt/ifrt/tf_host_callback.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/statusor.h"
-#include "tsl/platform/threadpool.h"
 #include "tsl/platform/tstring.h"
 #include "tfrt/host_context/concurrent_work_queue.h"  // from @tf_runtime
 
@@ -433,7 +434,9 @@ IfrtServingExecutable::CreateExecutableSynchronously(
       .platform_name = ifrt_client_->platform_name(),
   };
 
-  if (tf2hlo_arg.platform_name != xla::CudaName()) {
+  // Only get device topology for clients that implement GetTopologyForDevices.
+  if (tf2hlo_arg.platform_name != xla::CudaName() &&
+      !absl::StartsWith(ifrt_client_->runtime_type(), "proxy/")) {
     TF_ASSIGN_OR_RETURN(
         tf2hlo_arg.topology,
         ifrt_client_->GetTopologyForDevices(assigned_device_list_));
