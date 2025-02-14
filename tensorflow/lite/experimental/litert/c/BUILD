@@ -1,10 +1,16 @@
+# copybara:uncomment_begin(google-only)
+# load("//devtools/deps/check:deps_check.bzl", "check_dependencies")
+#
+# copybara:uncomment_end
 load("//tensorflow/lite/experimental/litert/build_common:litert_build_defs.bzl", "export_lrt_runtime_only_linkopt", "export_lrt_runtime_only_script")
+load("//tensorflow/lite/experimental/litert/build_common:special_rule.bzl", "gles_deps", "gles_linkopts")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         # copybara:uncomment "//third_party/mediapipe/calculators/tensor:__subpackages__",
         # copybara:uncomment "//third_party/odml/infra:__subpackages__",
+        # copybara:uncomment "//third_party/odml/litert:__subpackages__",
         "//tensorflow/lite/experimental/litert:__subpackages__",
     ],
 )
@@ -107,7 +113,7 @@ cc_test(
         "//tensorflow/lite/experimental/litert/cc:litert_buffer_ref",
         "//tensorflow/lite/experimental/litert/core/model",
         "//tensorflow/lite/experimental/litert/core/util:flatbuffer_tools",
-        "//tensorflow/lite/experimental/litert/test:test_macros",
+        "//tensorflow/lite/experimental/litert/test:matchers",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
@@ -143,9 +149,10 @@ cc_test(
     ],
     tags = ["no_oss"],
     deps = [
+        ":litert_common",
         ":litert_options",
         "//tensorflow/lite/experimental/litert/test:common",
-        "//tensorflow/lite/experimental/litert/test:test_macros",
+        "//tensorflow/lite/experimental/litert/test:matchers",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -171,6 +178,12 @@ cc_library(
         "litert_tensor_buffer.h",
         "litert_tensor_buffer_requirements.h",
     ],
+    linkopts = select({
+        "//tensorflow:android": [
+            "-landroid",
+        ],
+        "//conditions:default": [],
+    }) + gles_linkopts(),
     deps = [
         ":litert_common",
         ":litert_event",
@@ -179,7 +192,7 @@ cc_library(
         "//tensorflow/lite/experimental/litert/runtime:tensor_buffer",
         "@com_google_absl//absl/types:span",
         "@opencl_headers",
-    ],
+    ] + gles_deps(),
 )
 
 cc_test(
@@ -187,10 +200,6 @@ cc_test(
     srcs = [
         "litert_tensor_buffer_test.cc",
     ],
-    linkopts = select({
-        "//tensorflow:android": ["-landroid"],
-        "//conditions:default": [],
-    }),
     # require GPU to run OpenCL tests.
     tags = [
         "requires-gpu-nvidia",
@@ -464,7 +473,17 @@ cc_library(
         "//tensorflow/lite/experimental/litert/vendors/c:litert_dispatch.h",
     ],
     linkstatic = 1,
-    deps = ["@opencl_headers"],
+    deps = [
+        "@opencl_headers",
+    ] + gles_deps(),
 )
+
+# copybara:uncomment_begin(google-only)
+# # Check that litert runtime doesn't depend on MLIR.
+# check_dependencies(
+#     of = [":litert_runtime_c_api_shared_lib"],
+#     dont_match_regexp = "^//third_party/llvm/llvm-project/mlir",
+# )
+# copybara:uncomment_end
 
 exports_files(srcs = glob(["litert_*.h"]))

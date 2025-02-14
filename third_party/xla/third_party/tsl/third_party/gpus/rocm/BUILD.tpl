@@ -203,6 +203,7 @@ cc_library(
         "%{rocm_root}/include",
     ],
     linkstatic = 1,
+    visibility = ["//visibility:public"],
     deps = [":rocm_config"],
 )
 
@@ -248,10 +249,14 @@ cc_library(
     includes = [
         "%{rocm_root}/include",
     ],
+    linkopts = ["-lnuma"],
     linkstatic = 1,
     strip_include_prefix = "%{rocm_root}",
     visibility = ["//visibility:public"],
-    deps = [":rocm_config"],
+    deps = [
+      ":rocm_config",
+      ":system_libs",
+    ],
 )
 
 bzl_library(
