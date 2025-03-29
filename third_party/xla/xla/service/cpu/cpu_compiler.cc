@@ -238,8 +238,8 @@ limitations under the License.
 
 #if defined(INTEL_MKL)
 #include "xla/hlo/transforms/simplifiers/simplify_fp_conversions.h"
-#include "xla/service/cpu/cpu_float_support.h"
 #include "xla/service/cpu/onednn_contraction_rewriter.h"
+#include "xla/service/cpu/onednn_float_support.h"
 #include "xla/service/cpu/onednn_ops_rewriter.h"
 #endif
 
@@ -491,7 +491,7 @@ std::unique_ptr<HloPassFix<HloPassPipeline>> CreateSimplificationPipeline(
   pipeline->AddPass<ReshapeMover>();
   pipeline->AddPass<HloConstantFolding>(
       options::FoldAllConstants(module->config())
-          ? HloConstantFolding::Level::kAgressive
+          ? HloConstantFolding::Level::kAggressive
           : HloConstantFolding::Level::kDefault);
   pipeline->AddPass<ConditionalSimplifier>();
 
@@ -611,7 +611,7 @@ absl::Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   // BF16/F8 lowering for most ops.
   FloatSupport bf16_support(BF16);
 #if defined(INTEL_MKL)
-  CpuFloatSupport onednn_bf16_support(BF16);
+  OneDnnFloatSupport onednn_bf16_support(BF16);
   if (!is_aot_compile && !is_thunk_runtime) {
     pipeline.AddPass<FloatNormalization>(&onednn_bf16_support);
   } else {

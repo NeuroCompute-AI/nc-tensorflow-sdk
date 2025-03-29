@@ -338,6 +338,7 @@ xla_cc_test(
 cc_library(
     name = "pjrt_device_description",
     hdrs = ["pjrt_device_description.h"],
+    visibility = internal_visibility([":friends"]),
     deps = [
         ":pjrt_common",
         "@com_google_absl//absl/container:flat_hash_map",
@@ -621,7 +622,7 @@ cc_library(
         "//xla:debug_options_flags",
         "//xla:util",
         "//xla/hlo/builder:xla_computation",
-        "//xla/hlo/translate/mhlo_to_hlo:mlir_hlo_to_hlo",
+        "//xla/hlo/translate:stablehlo",
         "//xla/mlir/utils:error_util",
         "//xla/mlir_hlo:hlo_dialect_registration",
         "//xla/mlir_hlo:mhlo_passes",
@@ -705,6 +706,7 @@ cc_library(
     name = "host_memory_spaces",
     srcs = ["host_memory_spaces.cc"],
     hdrs = ["host_memory_spaces.h"],
+    visibility = internal_visibility([":friends"]),
     deps = [
         ":pjrt_client",
         "@com_google_absl//absl/log:check",
@@ -965,6 +967,7 @@ cc_library(
         "//xla/ffi:ffi_api",
         "//xla/ffi/api:ffi",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/synchronization",
@@ -979,9 +982,13 @@ xla_cc_test(
     deps = [
         ":host_callback",
         ":pjrt_client",
+        "//xla:xla_data_proto_cc",
         "//xla/tests:literal_test_util",
         "//xla/tsl/lib/core:status_test_util",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/synchronization",
         "@com_google_googletest//:gtest_main",
     ],
 )

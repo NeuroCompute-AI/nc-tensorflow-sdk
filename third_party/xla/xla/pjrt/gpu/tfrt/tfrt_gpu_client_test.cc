@@ -30,6 +30,7 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
@@ -46,15 +47,18 @@ limitations under the License.
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_executable.h"
+#include "xla/pjrt/pjrt_future.h"
 #include "xla/pjrt/plugin/xla_gpu/xla_gpu_client_options.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tests/literal_test_util.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
+#include "xla/tsl/framework/allocator.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "tsl/platform/casts.h"
+#include "tsl/platform/mem.h"
 
 namespace xla {
 
@@ -71,8 +75,10 @@ class DonationTransactionPeer {
 
 namespace {
 
+using ::testing::ElementsAreArray;
 using ::testing::HasSubstr;
 using ::testing::status::IsOkAndHolds;
+using ::testing::status::StatusIs;
 
 absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>> CompileExecutable(
     absl::string_view program, xla::PjRtClient& client,
@@ -213,7 +219,8 @@ TEST(TfrtGpuClientTest, ShouldStageHostToDeviceTransfersSetToTrue) {
           *client->addressable_devices()[0]->default_memory_space(),
           /*device_layout=*/nullptr));
   TF_EXPECT_OK(buffer->GetReadyFuture().Await());
-  TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteralSync());
+  TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<Literal> literal,
+                          buffer->ToLiteralSync());
   EXPECT_TRUE(
       LiteralTestUtil::Equal(*literal, LiteralUtil::CreateR1<int32_t>(data)));
 }
@@ -237,7 +244,8 @@ TEST(TfrtGpuClientTest, ShouldStageHostToDeviceTransfersSetToFalse) {
           *client->addressable_devices()[0]->default_memory_space(),
           /*device_layout=*/nullptr));
   TF_EXPECT_OK(buffer->GetReadyFuture().Await());
-  TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteralSync());
+  TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<Literal> literal,
+                          buffer->ToLiteralSync());
   EXPECT_TRUE(
       LiteralTestUtil::Equal(*literal, LiteralUtil::CreateR1<int32_t>(data)));
 }
@@ -246,13 +254,14 @@ TEST(TfrtGpuClientTest, ToLiteralAsync) {
   TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
   ASSERT_GE(client->addressable_devices().size(), 1);
 
-  auto* d = client->addressable_devices()[0];
+  PjRtDevice* const device = client->addressable_devices()[0];
   auto src_literal = LiteralUtil::CreateR1<float>({41.0f, 42.0f, 43.0f, 44.0f});
   TF_ASSERT_OK_AND_ASSIGN(
-      auto transfer_manager,
-      client->CreateBuffersForAsyncHostToDevice({src_literal.shape()},
-                                                *d->default_memory_space()));
-  auto buffer = transfer_manager->RetrieveBuffer(0);
+      std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager>
+          transfer_manager,
+      client->CreateBuffersForAsyncHostToDevice(
+          {src_literal.shape()}, *device->default_memory_space()));
+  std::unique_ptr<PjRtBuffer> buffer = transfer_manager->RetrieveBuffer(0);
 
   absl::Mutex mu;
   auto literal = std::make_shared<Literal>(
@@ -274,13 +283,14 @@ TEST(TfrtGpuClientTest, ToLiteralAsync) {
     mu.Await(absl::Condition(&got_literal));
   }
 
-  ASSERT_TRUE(ShapeUtil::Compatible(src_literal.shape(), literal->shape()));
-  ASSERT_EQ(src_literal.data<float>(),
+  EXPECT_TRUE(ShapeUtil::Compatible(src_literal.shape(), literal->shape()));
+  EXPECT_EQ(src_literal.data<float>(),
             literal->Relayout(src_literal.shape().layout()).data<float>());
 }
 
 TEST(TfrtGpuClientTest, ToLiteralAsyncWithNonCompactLayout) {
-  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
+                          GetTfrtGpuClient(GpuClientOptions()));
   ASSERT_GE(client->addressable_devices().size(), 1);
 
   xla::Shape transposed_shape = xla::ShapeUtil::MakeShapeWithDenseLayout(
@@ -295,11 +305,12 @@ TEST(TfrtGpuClientTest, ToLiteralAsyncWithNonCompactLayout) {
   std::vector<std::optional<xla::Layout>> device_layouts = {
       std::make_optional(transposed_shape.layout())};
   TF_ASSERT_OK_AND_ASSIGN(
-      auto transfer_manager,
+      std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager>
+          transfer_manager,
       client->CreateBuffersForAsyncHostToDevice(
           {spec}, device_layouts,
           client->addressable_devices()[0]->memory_spaces()[0]));
-  auto buffer = transfer_manager->RetrieveBuffer(0);
+  std::unique_ptr<PjRtBuffer> buffer = transfer_manager->RetrieveBuffer(0);
 
   absl::Mutex mu;
   auto literal = std::make_shared<Literal>(
@@ -321,22 +332,24 @@ TEST(TfrtGpuClientTest, ToLiteralAsyncWithNonCompactLayout) {
     mu.Await(absl::Condition(&got_literal));
   }
 
-  ASSERT_TRUE(ShapeUtil::Compatible(src_literal.shape(), literal->shape()));
-  ASSERT_EQ(src_literal.data<int32_t>(),
+  EXPECT_TRUE(ShapeUtil::Compatible(src_literal.shape(), literal->shape()));
+  EXPECT_EQ(src_literal.data<int32_t>(),
             literal->Relayout(src_literal.shape().layout()).data<int32_t>());
 }
 
 TEST(TfrtGpuClientTest, ToLiteralAsyncBeforeBufferReady) {
-  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
+                          GetTfrtGpuClient(GpuClientOptions()));
   ASSERT_GE(client->addressable_devices().size(), 1);
 
-  auto* d = client->addressable_devices()[0];
+  PjRtDevice* const device = client->addressable_devices()[0];
   auto src_literal = LiteralUtil::CreateR1<float>({41.0f, 42.0f, 43.0f, 44.0f});
   TF_ASSERT_OK_AND_ASSIGN(
-      auto transfer_manager,
-      client->CreateBuffersForAsyncHostToDevice({src_literal.shape()},
-                                                *d->default_memory_space()));
-  auto buffer = transfer_manager->RetrieveBuffer(0);
+      std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager>
+          transfer_manager,
+      client->CreateBuffersForAsyncHostToDevice(
+          {src_literal.shape()}, *device->default_memory_space()));
+  std::unique_ptr<PjRtBuffer> buffer = transfer_manager->RetrieveBuffer(0);
 
   absl::Mutex mu;
   auto literal = std::make_shared<Literal>(
@@ -361,30 +374,33 @@ TEST(TfrtGpuClientTest, ToLiteralAsyncBeforeBufferReady) {
     mu.Await(absl::Condition(&got_literal));
   }
 
-  ASSERT_TRUE(ShapeUtil::Compatible(src_literal.shape(), literal->shape()));
-  ASSERT_EQ(src_literal.data<float>(),
+  EXPECT_TRUE(ShapeUtil::Compatible(src_literal.shape(), literal->shape()));
+  EXPECT_EQ(src_literal.data<float>(),
             literal->Relayout(src_literal.shape().layout()).data<float>());
 }
 
 TEST(TfrtGpuClientTest, FromHostAsync) {
-  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
+                          GetTfrtGpuClient(GpuClientOptions()));
   ASSERT_GE(client->addressable_devices().size(), 1);
 
-  auto* d = client->addressable_devices()[0];
+  PjRtDevice* const device = client->addressable_devices()[0];
   std::vector<Literal> src_literals;
   std::vector<Shape> src_shapes;
   for (int i = 0; i < 4; ++i) {
     std::vector<float> data(i + 1);
     std::iota(data.begin(), data.end(), static_cast<float>(i + 10));
-    src_literals.emplace_back(LiteralUtil::CreateR1<float>(data));
+    src_literals.push_back(LiteralUtil::CreateR1<float>(data));
     src_shapes.push_back(src_literals.back().shape());
   }
-  TF_ASSERT_OK_AND_ASSIGN(auto transfer_manager,
-                          client->CreateBuffersForAsyncHostToDevice(
-                              src_shapes, *d->default_memory_space()));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager>
+          transfer_manager,
+      client->CreateBuffersForAsyncHostToDevice(
+          src_shapes, *device->default_memory_space()));
   std::vector<std::unique_ptr<PjRtBuffer>> buffers;
   for (int i = 0; i < src_shapes.size(); ++i) {
-    buffers.emplace_back(transfer_manager->RetrieveBuffer(i));
+    buffers.push_back(transfer_manager->RetrieveBuffer(i));
   }
 
   for (int i = 0; i < src_shapes.size(); ++i) {
@@ -426,16 +442,17 @@ TEST(TfrtGpuClientTest, FromHostAsync) {
   }
 
   for (int i = 0; i < src_literals.size(); ++i) {
-    ASSERT_TRUE(
+    EXPECT_TRUE(
         ShapeUtil::Compatible(src_literals[i].shape(), literals[i]->shape()));
-    ASSERT_EQ(
+    EXPECT_EQ(
         src_literals[i].data<float>(),
         literals[i]->Relayout(src_literals[i].shape().layout()).data<float>());
   }
 }
 
 TEST(TfrtGpuClientTest, CreateMixOfErrorBuffers) {
-  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
+                          GetTfrtGpuClient(GpuClientOptions()));
   ASSERT_GE(client->addressable_devices().size(), 1);
 
   std::vector<Literal> src_literals;
@@ -443,16 +460,17 @@ TEST(TfrtGpuClientTest, CreateMixOfErrorBuffers) {
   for (int i = 0; i < 4; ++i) {
     std::vector<float> data(i + 1);
     std::iota(data.begin(), data.end(), static_cast<float>(i + 10));
-    src_literals.emplace_back(LiteralUtil::CreateR1<float>(data));
+    src_literals.push_back(LiteralUtil::CreateR1<float>(data));
     src_shapes.push_back(src_literals.back().shape());
   }
   TF_ASSERT_OK_AND_ASSIGN(
-      auto transfer_manager,
+      std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager>
+          transfer_manager,
       client->CreateBuffersForAsyncHostToDevice(
           src_shapes, client->addressable_devices()[0]->memory_spaces()[0]));
   std::vector<std::unique_ptr<PjRtBuffer>> buffers;
   for (int i = 0; i < src_shapes.size(); ++i) {
-    buffers.emplace_back(transfer_manager->RetrieveBuffer(i));
+    buffers.push_back(transfer_manager->RetrieveBuffer(i));
   }
 
   absl::Mutex mu;
@@ -526,6 +544,191 @@ TEST(TfrtGpuClientTest, CreateViewOfDeviceBuffer) {
   EXPECT_FALSE(deleted);
   buffer.reset();
   EXPECT_TRUE(deleted);
+}
+
+TEST(TfrtGpuClientTest, CopyRawToHostFullBuffer) {
+  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  auto literal = xla::LiteralUtil::CreateR1<float>({41.0f, 42.0f});
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtBuffer> buffer,
+      client->BufferFromHostLiteral(literal, client->memory_spaces()[0]));
+
+  TF_ASSERT_OK_AND_ASSIGN(int64_t size, buffer->GetOnDeviceSizeInBytes());
+  void* dst =
+      tsl::port::AlignedMalloc(size, tsl::Allocator::kAllocatorAlignment);
+
+  auto result = buffer->CopyRawToHost(dst, 0, size);
+  TF_EXPECT_OK(result.Await());
+  EXPECT_EQ(*(static_cast<float*>(dst)), 41.0f);
+  EXPECT_EQ(*(static_cast<float*>(dst) + 1), 42.0f);
+
+  tsl::port::AlignedSizedFree(dst, tsl::Allocator::kAllocatorAlignment, size);
+}
+
+TEST(TfrtGpuClientTest, CopyRawToHostSubBuffer) {
+  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  auto literal = xla::LiteralUtil::CreateR1<float>({41.0f, 42.0f});
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtBuffer> buffer,
+      client->BufferFromHostLiteral(literal, client->memory_spaces()[0]));
+  TF_ASSERT_OK_AND_ASSIGN(int64_t size, buffer->GetOnDeviceSizeInBytes());
+  void* dst =
+      tsl::port::AlignedMalloc(size, tsl::Allocator::kAllocatorAlignment);
+
+  auto result = buffer->CopyRawToHost(dst, 0, sizeof(float));
+  TF_EXPECT_OK(result.Await());
+  EXPECT_EQ(*(static_cast<float*>(dst)), 41.0f);
+
+  tsl::port::AlignedSizedFree(dst, tsl::Allocator::kAllocatorAlignment, size);
+}
+
+TEST(TfrtGpuClientTest, CopyRawToHostOutOfRange) {
+  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  auto literal = xla::LiteralUtil::CreateR1<float>({41.0f, 42.0f});
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtBuffer> buffer,
+      client->BufferFromHostLiteral(literal, client->memory_spaces()[0]));
+  TF_ASSERT_OK_AND_ASSIGN(int64_t size, buffer->GetOnDeviceSizeInBytes());
+  void* dst =
+      tsl::port::AlignedMalloc(size, tsl::Allocator::kAllocatorAlignment);
+
+  auto result = buffer->CopyRawToHost(dst, 1, size);
+  EXPECT_THAT(result.Await(), StatusIs(absl::StatusCode::kInvalidArgument,
+                                       HasSubstr("invalid offset 1")));
+  tsl::port::AlignedSizedFree(dst, tsl::Allocator::kAllocatorAlignment, size);
+}
+
+TEST(TfrtGpuClientTest, CopyRawToHostFuture) {
+  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  auto literal = xla::LiteralUtil::CreateR1<float>({41.0f, 42.0f});
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtBuffer> buffer,
+      client->BufferFromHostLiteral(literal, client->memory_spaces()[0]));
+
+  auto dst_promise = xla::PjRtFuture<void*>::CreatePromise();
+  xla::PjRtFuture<void*> dst_future(dst_promise);
+
+  TF_ASSERT_OK_AND_ASSIGN(int64_t size, buffer->GetOnDeviceSizeInBytes());
+  auto ready = buffer->GetReadyFuture();
+  auto result = buffer->CopyRawToHostFuture(dst_future, 0, size);
+
+  // Drop the buffer before fulfilling `dst`. The transfer should still keep the
+  // buffer alive.
+  buffer.reset();
+  ready.OnReady([dst_promise = std::move(dst_promise),
+                 size](absl::Status status) mutable {
+    void* dst =
+        tsl::port::AlignedMalloc(size, tsl::Allocator::kAllocatorAlignment);
+    dst_promise.Set(dst);
+  });
+
+  TF_EXPECT_OK(result.Await());
+  TF_ASSERT_OK_AND_ASSIGN(auto* dst, dst_future.Await());
+  EXPECT_EQ(*(static_cast<float*>(dst)), 41.0f);
+  EXPECT_EQ(*(static_cast<float*>(dst) + 1), 42.0f);
+
+  tsl::port::AlignedSizedFree(dst, tsl::Allocator::kAllocatorAlignment, size);
+}
+
+TEST(TfrtGpuClientTest, CreateUninitializedBuffer) {
+  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+
+  Shape on_device_shape = ShapeUtil::MakeShapeWithType<int32_t>({4, 4});
+  TF_ASSERT_OK_AND_ASSIGN(
+      PjRtMemorySpace * memory_space,
+      client->addressable_devices()[0]->default_memory_space());
+  TF_ASSERT_OK_AND_ASSIGN(auto buffer, client->CreateUninitializedBuffer(
+                                           on_device_shape, memory_space));
+  EXPECT_EQ(*buffer->GetOnDeviceSizeInBytes(), 4 * 4 * 4);
+}
+
+TEST(TfrtGpuClientTest, SerializeExecutable) {
+  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  auto shape = xla::ShapeUtil::MakeScalarShape(xla::F32);
+  absl::Status input_error = absl::InvalidArgumentError("input error");
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto buffer,
+      client->CreateErrorBuffer(
+          input_error, shape,
+          *client->addressable_devices()[0]->default_memory_space()));
+
+  static constexpr char const* kAddProgram =
+      R"(
+HloModule Add.6, entry_computation_layout={(f32[], f32[])->(f32[], f32[])}
+
+ENTRY %Add.6 (a.1: f32[], b.2: f32[]) -> (f32[], f32[]) {
+  %a.1 = f32[] parameter(0)
+  %b.2 = f32[] parameter(1)
+  %add.3 = f32[] add(f32[] %a.1, f32[] %b.2)
+  %add.4 = f32[] add(f32[] %add.3, f32[] %add.3)
+  ROOT %tuple.5 = (f32[], f32[]) tuple(f32[] %add.3, f32[] %add.4)
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto executable,
+                          CompileExecutable(kAddProgram, *client));
+  auto gpu_exe = static_cast<TfrtGpuExecutable*>(std::move(executable).get());
+  EXPECT_EQ(gpu_exe->num_replicas(), 1);
+  EXPECT_EQ(gpu_exe->num_partitions(), 1);
+  EXPECT_EQ(gpu_exe->name(), "Add.6");
+  EXPECT_EQ(gpu_exe->addressable_devices().size(), 1);
+  // We could check md5sum but any compiler change might make this flaky.
+  EXPECT_TRUE(absl::StrContains(*gpu_exe->SerializeExecutable(),
+                                "Generated by LLVM NVPTX Back-End"));
+}
+
+TEST(TfrtGpuClientTest, CopyToMemorySpace) {
+  TF_ASSERT_OK_AND_ASSIGN(auto client, GetTfrtGpuClient(GpuClientOptions()));
+  for (auto* memory_space : client->memory_spaces()) {
+    xla::Shape shape = xla::ShapeUtil::MakeShape(S32, {128, 256});
+    TF_ASSERT_OK_AND_ASSIGN(Literal literal, xla::MakeFakeLiteral(shape));
+    TF_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<PjRtBuffer> buffer,
+        client->BufferFromHostLiteral(literal, memory_space));
+    TF_ASSERT_OK_AND_ASSIGN(buffer,
+                            buffer->CopyToMemorySpace(buffer->memory_space()));
+    TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<Literal> received_literal,
+                            buffer->ToLiteralSync());
+    EXPECT_THAT(received_literal->data<int32_t>(),
+                ElementsAreArray(literal.data<int32_t>()));
+  }
+}
+
+TEST(TfrtGpuClientTest, AsyncCopyToDevice) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
+                          GetTfrtGpuClient(GpuClientOptions()));
+  ASSERT_GE(client->addressable_devices().size(), 2);
+
+  // d0 is the device we will perform local/remote sends from.
+  PjRtDevice* const d0 = client->addressable_devices()[0];
+  // d1 is the device we will perform local/remote recvs, where the recv
+  // sync flag may be contended.
+  PjRtDevice* const d1 = client->addressable_devices()[1];
+
+  auto src_literal = LiteralUtil::CreateR1<float>({41.0f, 42.0f, 43.0f, 44.0f});
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtClient::AsyncHostToDeviceTransferManager>
+          transfer_manager,
+      client->CreateBuffersForAsyncHostToDevice({src_literal.shape()},
+                                                *d0->default_memory_space()));
+  std::unique_ptr<PjRtBuffer> src_buffer = transfer_manager->RetrieveBuffer(0);
+  // CopyToMemorySpace won't be enqueued until src_buffer is available.
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PjRtBuffer> local_recv_buffer,
+      src_buffer->CopyToMemorySpace(*d1->default_memory_space()));
+
+  TF_ASSERT_OK(
+      transfer_manager->TransferLiteralToBuffer(0, src_literal, []() {}));
+
+  auto literal = std::make_shared<Literal>(src_literal.shape());
+
+  PjRtFuture<> local_recv_literal = local_recv_buffer->ToLiteral(literal.get());
+  TF_EXPECT_OK(local_recv_literal.Await());
+
+  EXPECT_TRUE(ShapeUtil::Compatible(src_literal.shape(), literal->shape()));
+  EXPECT_EQ(src_literal.data<float>(),
+            literal->Relayout(src_literal.shape().layout()).data<float>());
 }
 
 }  // namespace
