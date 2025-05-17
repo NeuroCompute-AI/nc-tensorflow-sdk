@@ -1,4 +1,4 @@
-/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2025 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,20 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_COMPILER_MLIR_STABLEHLO_TRANSFORMS_TF_STABLEHLO_PASSES_H_
-#define TENSORFLOW_COMPILER_MLIR_STABLEHLO_TRANSFORMS_TF_STABLEHLO_PASSES_H_
+#ifndef XLA_PJRT_COMPILE_OPTIONS_PB_H_
+#define XLA_PJRT_COMPILE_OPTIONS_PB_H_
 
-#include <memory>
+// TODO(b/401293975): Delete this file and migrate Jax to use the proto target
+// directly.
+#include "xla/pjrt/proto/compile_options.pb.h"
 
-#include "mlir/Pass/Pass.h"  // from @llvm-project
-
-namespace mlir {
-namespace odml::tf_quant {
-
-// Fuses MHLO binary element-wise ops and convolution op.
-std::unique_ptr<Pass> CreateTfFuseConvolutionPass();
-
-}  // namespace odml::tf_quant
-}  // namespace mlir
-
-#endif  // TENSORFLOW_COMPILER_MLIR_STABLEHLO_TRANSFORMS_TF_STABLEHLO_PASSES_H_
+#endif  // XLA_PJRT_COMPILE_OPTIONS_PB_H_
