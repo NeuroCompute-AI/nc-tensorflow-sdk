@@ -251,7 +251,8 @@ absl::StatusOr<std::unique_ptr<GpuExecutable>> GpuExecutable::Create(
       std::move(params.mlir_allocations), std::move(params.buffer_assignment),
       std::move(allocator.MutableAllocations()), std::move(params.alias_info),
       std::move(params.debug_options), std::move(params.constants),
-      std::move(params.output_info), params.enable_debug_info_manager));
+      std::move(params.output_info), params.enable_debug_info_manager,
+      std::move(params.module_stats)));
 }
 
 // Implementation note: HLO profiling is always enabled for GPU executables,
@@ -268,7 +269,7 @@ GpuExecutable::GpuExecutable(
     std::unique_ptr<GpuAliasInfo> alias_info, DebugOptions debug_options,
     std::vector<ConstantInfo> constants,
     absl::flat_hash_map<ShapeIndex, OutputInfo> output_info,
-    bool enable_debug_info_manager)
+    bool enable_debug_info_manager, ModuleStats module_stats)
     : Executable(std::move(debug_module)),
       text_(std::move(asm_text)),
       binary_(std::move(binary)),
@@ -300,6 +301,7 @@ GpuExecutable::GpuExecutable(
     XlaDebugInfoManager::Get()->RegisterModule(shared_module(),
                                                buffer_assignment_);
   }
+  set_module_stats(std::move(module_stats));
 }
 
 GpuExecutable::~GpuExecutable() {
@@ -1257,7 +1259,9 @@ absl::StatusOr<GpuExecutableProto> GpuExecutable::ToProto() const {
 absl::StatusOr<std::unique_ptr<GpuExecutable>> GpuExecutable::FromProto(
     const GpuExecutableProto& proto,
     const se::DeviceDescription& device_description,
-    absl::string_view platform_name) {
+    absl::string_view platform_name,
+    const std::optional<stream_executor::KernelLoaderSpec::SymbolResolver>&
+        symbol_resolver) {
   Params params;
   params.enable_debug_info_manager = false;
   params.asm_text = proto.asm_text();
@@ -1300,7 +1304,8 @@ absl::StatusOr<std::unique_ptr<GpuExecutable>> GpuExecutable::FromProto(
   TF_ASSIGN_OR_RETURN(
       std::unique_ptr<Thunk> thunk,
       DeserializeThunkProto(proto.thunk(), params.mlir_allocations.value(),
-                            params.debug_module.get(), platform_name));
+                            params.debug_module.get(), platform_name,
+                            symbol_resolver));
 
   if (dynamic_cast<const SequentialThunk*>(thunk.get()) == nullptr) {
     return absl::InvalidArgumentError(
